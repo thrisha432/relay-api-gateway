@@ -410,7 +410,7 @@ def write_summary(rows, matrix: Path, chaos: Path | None) -> None:
             [*cols_basic[:5], ("Dropped iterations", "dropped", "{}")],
             "open_loop.png",
         ),
-        ("scaling", "Horizontal scaling (100 VUs)", cols_basic, "scaling.png"),
+        ("scaling", "Horizontal scaling (60 VUs)", cols_basic, "scaling.png"),
         (
             "ablation",
             "Ablation: where the per-request cost goes (50 VUs)",

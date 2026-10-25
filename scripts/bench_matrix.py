@@ -96,7 +96,7 @@ def experiments() -> dict[str, list[Cell]]:
             for r in (200, 400, 600, 800, 1000, 1200, 1400, 1600, 2000)
             for m in ("nginx", "relay-uncached", "relay-unlimited")
         ],
-        "scaling": [Cell("scaling", "relay-pool", vus=100, instances=n) for n in (1, 2, 4)],
+        "scaling": [Cell("scaling", "relay-pool", vus=60, instances=n) for n in (1, 2, 4)],
         "ablation": [
             Cell("ablation", m, vus=50)
             for m in (
