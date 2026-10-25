@@ -1,0 +1,96 @@
+# Relay route configuration (Docker Compose demo).
+# Upstream URLs are trusted configuration: clients can never choose a target.
+# Secrets never belong here; use environment variables (see .env.example).
+
+server:
+  host: "0.0.0.0"          # inside the container; Compose publishes on 127.0.0.1 only
+  port: 8080
+  max_request_body_bytes: 1048576     # 1 MiB
+  max_response_body_bytes: 10485760   # 10 MiB (responses are buffered, not streamed)
+  trusted_proxies: []                 # X-Forwarded-For is ignored unless the peer is listed
+  enable_route_summary: true
+
+redis:
+  url: "redis://redis:6379/0"         # override with RELAY_REDIS_URL
+  connect_timeout_seconds: 0.5
+  operation_timeout_seconds: 0.5
+  fail_open_for_rate_limit: false     # Redis down => 503 on rate-limited routes
+
+cache:
+  backend: "local"                    # "local" (per-process LRU) or "redis" (shared)
+  max_entries: 1024
+
+defaults:
+  timeouts:
+    connect_seconds: 0.5
+    attempt_seconds: 2.0
+    request_seconds: 5.0
+  retries:
+    max_attempts: 2                   # total attempts, including the first
+    retry_status_codes: [502, 503, 504]
+    retry_methods: ["GET", "HEAD", "OPTIONS"]
+    backoff_base_seconds: 0.05
+    backoff_max_seconds: 0.5
+  health_check:
+    path: "/health"
+    interval_seconds: 2.0
+    timeout_seconds: 0.5
+    unhealthy_threshold: 3
+    healthy_threshold: 2
+  circuit_breaker:
+    failure_threshold: 5
+    recovery_timeout_seconds: 10.0
+    half_open_max_probes: 1
+    success_threshold: 1
+    failure_status_codes: [502, 503, 504]
+
+routes:
+  - id: "catalog"
+    path_prefix: "/api/catalog"
+    upstreams:
+      - id: "catalog-a"
+        url: "http://backend-a:8001"
+      - id: "catalog-b"
+        url: "http://backend-b:8002"
+    rate_limit:
+      capacity: 60
+      refill_rate_per_second: 10.0
+    cache:
+      enabled: true
+      ttl_seconds: 10
+      max_entry_bytes: 65536
+      allowed_status_codes: [200]
+
+  - id: "orders"
+    path_prefix: "/api/orders"
+    upstreams:
+      - id: "orders-a"
+        url: "http://backend-a:8001"
+      - id: "orders-b"
+        url: "http://backend-b:8002"
+    rate_limit:
+      capacity: 5
+      refill_rate_per_second: 1.0
+    retries:
+      max_attempts: 1                 # no retries for this route
+
+  # Benchmark-only route: no rate limit, no cache, so k6 measures pure proxy overhead.
+  - id: "bench"
+    path_prefix: "/api/bench"
+    upstreams:
+      - id: "bench-a"
+        url: "http://backend-a:8001"
+      - id: "bench-b"
+        url: "http://backend-b:8002"
+
+  # Same backends with caching on, for the cache-friendly benchmark scenario.
+  - id: "bench-cached"
+    path_prefix: "/api/bench-cached"
+    upstreams:
+      - id: "bench-cached-a"
+        url: "http://backend-a:8001"
+      - id: "bench-cached-b"
+        url: "http://backend-b:8002"
+    cache:
+      enabled: true
+      ttl_seconds: 30

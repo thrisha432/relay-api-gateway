@@ -61,6 +61,7 @@ markers = [
     "redis: requires a real Redis server (set REDIS_URL); skipped when unavailable",
 ]
 addopts = "-ra --strict-markers"
+pythonpath = ["tests"]
 
 [tool.coverage.run]
 source = ["relay", "mock_backend"]
