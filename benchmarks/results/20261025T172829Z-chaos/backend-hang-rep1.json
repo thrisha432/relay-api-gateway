@@ -1,0 +1,32 @@
+{
+  "scenario": "backend-hang",
+  "description": "backend-b accepts requests but responds after 10 s (health endpoint still fine)",
+  "rep": 1,
+  "events_s": {
+    "fault": 20.005156993865967,
+    "recover": 45.00520610809326
+  },
+  "vm_clock_offset_s": 0.049,
+  "baseline_p99_ms": 5.0,
+  "fault_window_requests": 7505,
+  "fault_window_errors": 454,
+  "fault_window_error_pct": 6.049,
+  "fault_window_max_p99_ms": 2500.0,
+  "after_recovery_errors": 0,
+  "first_error_s": 20,
+  "last_error_s": 21,
+  "error_free_after_s": 0,
+  "total_requests": 20727,
+  "total_errors": 454,
+  "gateway_counter_deltas": {
+    "relay_circuit_breaker_rejections_total{upstream=\"bench-ha-b\"}": 5120.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"closed\",to_state=\"open\",upstream=\"bench-ha-b\"}": 1.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"half_open\",to_state=\"closed\",upstream=\"bench-ha-b\"}": 1.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"half_open\",to_state=\"open\",upstream=\"bench-ha-b\"}": 2.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"open\",to_state=\"half_open\",upstream=\"bench-ha-b\"}": 3.0,
+    "relay_retries_total{reason=\"timeout\"}": 66.0,
+    "relay_upstream_requests_total{outcome=\"2xx\",upstream=\"bench-ha-a\"}": 15453.0,
+    "relay_upstream_requests_total{outcome=\"2xx\",upstream=\"bench-ha-b\"}": 5094.0,
+    "relay_upstream_requests_total{outcome=\"timeout\",upstream=\"bench-ha-b\"}": 66.0
+  }
+}

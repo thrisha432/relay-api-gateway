@@ -1,0 +1,7 @@
+# Secret scanning config (CI: gitleaks). Extends the default rules.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deliberately fake credentials used to prove secrets never leak"
+paths = ['''tests/security/test_security\.py''']

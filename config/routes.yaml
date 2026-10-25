@@ -161,3 +161,18 @@ routes:
     retries: { max_attempts: 3, budget_enabled: false }
     circuit_breaker: { failure_threshold: 1000 }
     health_check: { enabled: false }
+
+  # Single-upstream brownout: retries can only go back to the same struggling
+  # backend, which is the retry-storm case a retry budget exists for.
+  - id: "bench-budget-single"
+    path_prefix: "/api/bench-budget-single"
+    upstreams: [{ id: "bench-budget-single-a", url: "http://backend-a:8001" }]
+    retries: { max_attempts: 3, budget_enabled: true }   # default budget: 20%
+    circuit_breaker: { failure_threshold: 1000 }
+    health_check: { enabled: false }
+  - id: "bench-nobudget-single"
+    path_prefix: "/api/bench-nobudget-single"
+    upstreams: [{ id: "bench-nobudget-single-a", url: "http://backend-a:8001" }]
+    retries: { max_attempts: 3, budget_enabled: false }
+    circuit_breaker: { failure_threshold: 1000 }
+    health_check: { enabled: false }

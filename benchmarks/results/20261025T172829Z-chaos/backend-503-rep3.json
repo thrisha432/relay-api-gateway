@@ -1,0 +1,31 @@
+{
+  "scenario": "backend-503",
+  "description": "backend-b returns 503 to every request and fails health checks",
+  "rep": 3,
+  "events_s": {
+    "fault": 20.00095772743225,
+    "recover": 45.00413942337036
+  },
+  "vm_clock_offset_s": 0.047,
+  "baseline_p99_ms": 5.0,
+  "fault_window_requests": 7501,
+  "fault_window_errors": 0,
+  "fault_window_error_pct": 0.0,
+  "fault_window_max_p99_ms": 25.0,
+  "after_recovery_errors": 0,
+  "first_error_s": null,
+  "last_error_s": null,
+  "error_free_after_s": 0,
+  "total_requests": 20739,
+  "total_errors": 0,
+  "gateway_counter_deltas": {
+    "relay_circuit_breaker_rejections_total{upstream=\"bench-ha-b\"}": 878.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"closed\",to_state=\"open\",upstream=\"bench-ha-b\"}": 1.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"half_open\",to_state=\"closed\",upstream=\"bench-ha-b\"}": 1.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"open\",to_state=\"half_open\",upstream=\"bench-ha-b\"}": 1.0,
+    "relay_retries_total{reason=\"status\"}": 5.0,
+    "relay_upstream_requests_total{outcome=\"2xx\",upstream=\"bench-ha-a\"}": 14687.0,
+    "relay_upstream_requests_total{outcome=\"2xx\",upstream=\"bench-ha-b\"}": 6313.0,
+    "relay_upstream_requests_total{outcome=\"5xx\",upstream=\"bench-ha-b\"}": 5.0
+  }
+}

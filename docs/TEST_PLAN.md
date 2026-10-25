@@ -60,7 +60,7 @@ REDIS_URL=redis://127.0.0.1:6390/15 .venv/bin/pytest --cov   # + real Redis
 | **Chaos / fault injection** | A TCP proxy that resets, black-holes, or truncates connections to Redis and upstreams, then heals them | `integration/test_chaos.py`, `tests/chaos_proxy.py` |
 | **Multi-process** | 3 real `python -m relay` processes share one Redis bucket; SIGTERM shutdown verified | `integration/test_lifecycle.py` |
 | **Adversarial security** | Raw-socket attacks against the real HTTP parser | `security/test_security.py`, SECURITY.md |
-| **Regression for benchmark-found bugs** | The pool leak (A16) and metastable overload (A17) are reproduced and guarded | `integration/test_pool_leak.py`, `integration/test_admission.py` |
+| **Regression for benchmark-found bugs** | The pool leak (A16), metastable overload (A17), and head-of-line coupling (A19) are reproduced and guarded | `integration/test_pool_leak.py`, `integration/test_admission.py`, `integration/test_least_request.py` |
 
 ## Outside pytest
 

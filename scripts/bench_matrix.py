@@ -51,6 +51,8 @@ MODES: dict[str, tuple[str, str, int, str]] = {
     "relay-nocoalesce": ("http://relay:8080", "/api/bench-nocoalesce", 0, "relay"),
     "relay-budget": ("http://relay:8080", "/api/bench-budget", 100, "relay"),
     "relay-nobudget": ("http://relay:8080", "/api/bench-nobudget", 100, "relay"),
+    "relay-budget-single": ("http://relay:8080", "/api/bench-budget-single", 100, "relay"),
+    "relay-nobudget-single": ("http://relay:8080", "/api/bench-nobudget-single", 100, "relay"),
 }
 
 
@@ -65,6 +67,8 @@ class Cell:
     herd_ms: int = 0
     instances: int = 1
     brownout: bool = False
+    # Which backend fails every 2nd request during a brownout run.
+    brownout_backend: str = "b"
 
     @property
     def name(self) -> str:
@@ -114,6 +118,10 @@ def experiments() -> dict[str, list[Cell]]:
         ],
         "brownout": [
             Cell("brownout", m, vus=20, brownout=True) for m in ("relay-budget", "relay-nobudget")
+        ]
+        + [
+            Cell("brownout", m, vus=20, brownout=True, brownout_backend="a")
+            for m in ("relay-budget-single", "relay-nobudget-single")
         ],
     }
 
@@ -242,8 +250,8 @@ def run_cell(cell: Cell, rep: int, duration: str, raw_dir: Path, attempt: int = 
     out_name = f"{cell.name}-rep{rep}.json"
     for b in BACKENDS:
         mock(b, "/__mock/reset", {})
-    if cell.brownout:  # backend-b fails every 2nd request with 503
-        mock("b", "/__mock/config", {"fail_status": 503, "fail_every": 2})
+    if cell.brownout:  # the brownout backend fails every 2nd request with 503
+        mock(cell.brownout_backend, "/__mock/config", {"fail_status": 503, "fail_every": 2})
     env = [
         f"BASE={base}",
         f"ROUTE={route}",
@@ -265,7 +273,7 @@ def run_cell(cell: Cell, rep: int, duration: str, raw_dir: Path, attempt: int = 
     sampler.stop()
     upstream = upstream_requests()  # read before any reset below
     if cell.brownout:
-        mock("b", "/__mock/reset", {})
+        mock(cell.brownout_backend, "/__mock/reset", {})
 
     summary = json.loads((raw_dir / out_name).read_text())
     planned_ms = _seconds(duration) * 1000

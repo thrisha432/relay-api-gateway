@@ -7,8 +7,8 @@ command shown; nothing below is estimated.
 |---|---|---|
 | Lint + format | clean | `ruff check . && ruff format --check .` |
 | Static types | `mypy --strict`: 0 issues in 29 source files | `mypy` |
-| Tests | see `scripts/verify.sh` output (unit, integration, security, property, chaos, multi-process) | `REDIS_URL=... pytest` |
-| Branch coverage | reported by `pytest --cov` | `pytest --cov` |
+| Tests | **333 passed** (unit, integration, security, property, chaos, multi-process) against a real Redis 7.4, `scripts/verify.sh`, 2026-10-25 | `REDIS_URL=... pytest` |
+| Branch coverage | **96%** (`relay` + `mock_backend`) | `pytest --cov` |
 | Dependency vulnerabilities | `pip-audit`: no known vulnerabilities in `requirements.lock` (2026-10-25) | `pip-audit -r requirements.lock` |
 | Mutation testing (core logic) | **575 / 642 mutants detected (89.6%)**; all **67 survivors reviewed and classified as equivalent** | `mutmut run` |
 

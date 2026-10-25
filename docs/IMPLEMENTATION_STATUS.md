@@ -13,7 +13,17 @@ Legend: ✅ done and verified by tests that were actually run · 🟡 in progres
 | 6 | Prometheus metrics, Grafana dashboard | Dashboard shows rate, latency, errors, cache, limits, health | ✅ |
 | 7 | Docker, CI, k6 benchmarks, docs, demo | Starts from docs; tests pass; claims backed by saved output | ✅ (CI workflow written, not yet run on GitHub) |
 
-## Evidence
+## v1.0 (validation pass)
+
+| Area | Status |
+|---|---|
+| Audit of v0.1 (docs/AUDIT.md) | ✅ 18 of 19 findings resolved; A15 (CI run on GitHub) needs the repo pushed |
+| Admission control, coalescing, retry budget, least-request, header limits | ✅ implemented + tested |
+| Benchmark-found bugs (pool leak A16, metastable overload A17, head-of-line A19) | ✅ fixed + regression-tested |
+| Benchmark matrix, chaos timelines, A/B tool | ✅ results in `benchmarks/results/` |
+| Mutation testing, mypy --strict, pip-audit, Hypothesis, chaos proxy, security suite | ✅ |
+
+## Evidence (v0.1)
 
 * Tests: 237 passed locally (Python 3.14, real Redis 7.4 + fakeredis); 96% branch coverage.
 * Stack: `docker compose up` plus `scripts/smoke_test.sh` passed; Prometheus target up; every Grafana panel query returned data; datasource health OK.

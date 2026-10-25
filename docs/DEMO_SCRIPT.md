@@ -60,6 +60,21 @@ backend-a, so clients see no errors. The breaker opens and fails fast, and
 health checks take the instance out of rotation. After recovery, a half-open
 probe closes the breaker."
 
+## 5b. Overload: admission control (45 s)
+
+```bash
+docker compose --profile bench run --rm -e BASE=http://relay:8080 -e ROUTE=/api/bench \
+  -e EXECUTOR=open -e RATE=3000 -e DURATION=20s k6 run /scripts/matrix.js
+curl -s localhost:8080/metrics | grep -E '^relay_(load_shed_total|event_loop_lag_seconds)'
+curl -s localhost:8080/health/live     # still answers instantly under overload
+```
+
+Say: "This is 3,000 requests a second against a gateway that can serve about
+1,000–2,000. Without admission control the same code collapses to about 60 req/s and
+the breaker blames a healthy backend. With it, Relay serves near capacity and sheds
+the rest with a cheap 503 + Retry-After. The open-loop chart in the benchmark report
+shows both."
+
 ## 6. Grafana (45 s)
 
 Open <http://localhost:3000> (anonymous viewer; dashboard "Relay API Gateway").

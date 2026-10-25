@@ -165,8 +165,10 @@ def build() -> dict:
             "5xx error rate by route",
             [
                 (
-                    f'100 * sum by (route) (rate(relay_requests_total{{{R}, status_class="5xx"}}[{RI}]))'
-                    f" / clamp_min(sum by (route) (rate(relay_requests_total{{{R}}}[{RI}])), 1e-9)",
+                    # "or 0 * total": show 0% per route (not "No data") when there are no 5xx.
+                    f'(100 * sum by (route) (rate(relay_requests_total{{{R}, status_class="5xx"}}[{RI}]))'
+                    f" / clamp_min(sum by (route) (rate(relay_requests_total{{{R}}}[{RI}])), 1e-9))"
+                    f' or (0 * sum by (route) (rate(relay_requests_total{{{R}, route!="_ops"}}[{RI}])))',
                     "{{route}}",
                 )
             ],
@@ -302,7 +304,8 @@ def build() -> dict:
         ),
         series(
             "Load shed (503 overloaded)",
-            [(f"sum by (route) (rate(relay_load_shed_total{{{R}}}[{RI}]))", "{{route}}")],
+            # "or vector(0)": an explicit 0 rather than "No data" when nothing was shed.
+            [(f"sum(rate(relay_load_shed_total{{{R}}}[{RI}])) or vector(0)", "shed")],
             12,
             52,
             unit="ops",

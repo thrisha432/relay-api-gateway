@@ -1,63 +1,113 @@
-# Relay: an asynchronous Python API gateway
+# Relay: an asynchronous Python API gateway, measured to destruction
 
 [![CI](https://github.com/OWNER/relay-api-gateway/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-Relay is a configuration-driven HTTP API gateway built on asyncio. It sits
-between clients and a fixed set of backend services and adds the
-cross-cutting reliability features gateways normally provide: health-aware
-load balancing, distributed rate limiting, response caching, circuit
-breakers, safe retries, and Prometheus/Grafana observability. Every behavior
-is tested, and every performance number is backed by saved benchmark output.
+Relay is a configuration-driven HTTP API gateway built on asyncio:
+health-aware load balancing, Redis-backed distributed rate limiting, a
+from-scratch LRU response cache with request coalescing, circuit breakers,
+deadline-bounded safe retries with a retry budget, admission control, and
+Prometheus/Grafana observability.
 
-> **Portfolio project.** Relay is built and tested carefully, but it is a
-> local learning project, **not production-certified infrastructure**. See
-> [SECURITY.md](docs/SECURITY.md).
+The point of the project is less the feature list than **the evidence**.
+Every claim is backed by a test or a saved benchmark, and the benchmarks
+found two serious bugs that 230+ passing tests had missed (see
+[What the benchmarks found](#what-the-benchmarks-found)).
+
+> **Portfolio project, not production-certified infrastructure.** See
+> [SECURITY.md](docs/SECURITY.md) for the scope and known limitations.
+
+## Highlights (all measured; sources linked)
+
+| | Result | Evidence |
+|---|---|---|
+| Overload | Admission control keeps **~0.8–1.0k req/s of goodput** at up to 3.5× capacity; with it disabled the same code collapses to **~60 req/s** (metastable failure) | [open-loop sweep](docs/BENCHMARK_REPORT.md#3-overload-open-loop-arrival-rate-sweep-audit-a5-a17) |
+| Bug found by benchmarking | An httpcore pool race leaked connections and turned an overload spike into a **permanent outage**; made structurally impossible, with a regression test | [AUDIT A16](docs/AUDIT.md), [ARCHITECTURE](docs/ARCHITECTURE.md#upstream-connection-pool-a-design-constraint-audit-a16) |
+| Cache stampede | Request coalescing: **~80× fewer** upstream requests for a hot key, p99 halved | [report §5](docs/BENCHMARK_REPORT.md#5-cache-stampede-request-coalescing-audit-a3) |
+| Distributed rate limiting | 3 separate gateway **processes**, 300 concurrent requests, capacity 40 → **exactly 40** admitted; Lua bucket agrees with a reference model on random timelines | `test_lifecycle.py`, `test_properties.py` |
+| Gateway overhead | Against a 0 ms backend: about 5% of direct throughput (NGINX: 93%). Against a 50–100 ms backend: **83–88% of direct** | [report §1–2](docs/BENCHMARK_REPORT.md) |
+| Horizontal scaling | **2.15×** with 2 instances, **4.14×** with 4 (paired) | [report §4](docs/BENCHMARK_REPORT.md#4-horizontal-scaling) |
+| Test strength | 330+ tests (unit, integration, property-based, chaos, multi-process, adversarial); mutation testing: **every behavior-changing mutant killed** in the core modules | [QUALITY.md](docs/QUALITY.md), [TEST_PLAN.md](docs/TEST_PLAN.md) |
+
+The honest part: against a backend that does nothing, Relay's uncached path
+reaches only about 5% of direct throughput. That's the cost of a Python ASGI
+hop on one core, and NGINX barely pays it. Relay's value is its policies,
+not raw proxy speed, and the reports say so.
 
 ## Features
 
 | Feature | How |
 |---|---|
-| Config-driven routing | Longest-prefix match on segment boundaries; upstreams only from validated YAML (no SSRF) |
-| Load balancing | Round-robin over currently healthy instances, with failover order |
-| Active health checks | One lifespan-managed task per route; consecutive-threshold hysteresis |
-| Distributed rate limiting | Token bucket in an **atomic Redis Lua script** using Redis server time; 429 + `Retry-After`; explicit fail-closed outage policy |
-| Custom LRU cache | Hash map + doubly linked list with sentinels, O(1) average; invariant-checked |
-| Safe response caching | GET only; never caches credentialed, cookie-setting, `private`/`no-store` responses; local LRU or shared Redis backend |
-| Circuit breakers | Per upstream; closed / open / half-open with bounded concurrent probes; cannot get stuck |
-| Timeouts and retries | Connect / per-attempt / whole-request deadlines; retries only GET/HEAD/OPTIONS with full-jitter backoff |
-| Observability | Prometheus metrics with bounded labels, structured JSON access logs, a provisioned Grafana dashboard |
-| Proxy correctness | Hop-by-hop header stripping, byte-exact headers, encoded paths preserved, request/response size caps, stable JSON errors |
+| Routing | Longest-prefix match on path-segment boundaries; upstreams only from validated YAML (no SSRF); dot segments rejected however encoded |
+| Load balancing | Round-robin over healthy instances (default) or **least-request**, which routes around slow or hung instances |
+| Health checks | One lifespan-managed task per route; consecutive-threshold hysteresis; dedicated client |
+| Rate limiting | Token bucket in an **atomic Redis Lua script** on Redis server time; 429 + `Retry-After`; explicit fail-closed outage policy |
+| Caching | From-scratch O(1) LRU (hash map + doubly linked list); conservative HTTP cache policy; local or shared Redis backend; **single-flight coalescing** |
+| Circuit breakers | Per upstream; bounded half-open probes; generation-stamped permits so late results can't corrupt state; can't get stuck |
+| Timeouts and retries | Connect / attempt / request deadlines; only GET/HEAD/OPTIONS retried; full-jitter backoff; **retry budget** caps aggregate amplification |
+| Admission control | `max_in_flight` + bounded FIFO wait queue + cheap 503 `overloaded`; sized by Little's law; health endpoints never shed |
+| Hardening | Header size/count limits (431), body limits (413), hop-by-hop stripping, no internals in errors, no secrets in logs or metric labels |
+| Observability | Prometheus metrics with bounded labels (incl. event-loop lag, pool health, load shedding), JSON access logs, provisioned Grafana dashboard |
+
+## What the benchmarks found
+
+An [audit](docs/AUDIT.md) of v0.1 listed 15 gaps. Building the benchmark
+suite to close them uncovered more, each now fixed and regression-tested:
+
+1. **Permanent outage after an overload spike (critical).** Every route
+   returned 504 forever, while the backend answered in 1 ms. The cause is a
+   race in httpcore's connection pool (still present in the latest release):
+   a waiter that gets a newly created connection and then times out or is
+   cancelled orphans that connection forever. My first fix (stop cancelling
+   httpx) only *reduced* it, which repeated runs exposed. The real fix makes
+   the race unreachable: requests never wait in the pool queue, enforced by
+   config validation.
+2. **Metastable overload.** Requests queued inside the gateway until they
+   timed out; the breaker blamed the healthy backend and stayed open. Fixed
+   with admission control, iterated twice on data (shed cheaply in the
+   outermost layer; add a bounded queue because clients that retry instantly
+   collapsed goodput to ~117 req/s).
+3. **Head-of-line coupling.** A hung backend held the gateway's concurrency
+   slots, so requests for the *healthy* backend were shed. Least-request
+   balancing routes around it.
+4. **A cache-correctness hole that 96% coverage missed.** Mutation testing
+   showed that `Cache-Control: max-age=60,no-store` (no space) would have
+   been cached.
+5. **Benchmarks that lied.** Host sleep froze the Docker VM mid-run (106 s
+   "requests"); a "45% speedup" turned out, under A/B, to be the
+   environment. The harness now discards stretched runs and the report uses
+   paired comparisons.
+
+Each of these is written up for interviews in
+[INTERVIEW_GUIDE.md](docs/INTERVIEW_GUIDE.md).
+
+## Monitoring
+
+`docker compose up -d` provisions Prometheus and a Grafana dashboard. Below:
+live traffic (300 req/s two-backend route plus a cached, rate-limited route)
+while backend-b fails for 50 s. Its health drops, its breaker opens, a few
+requests are retried, and the **client 5xx rate stays at 0%**.
+
+![Grafana dashboard during an injected backend failure](docs/images/grafana-dashboard.png)
 
 ## Architecture
 
 ```text
- client / k6
-     │
-     ▼
- ┌──────────────────────── Relay (one asyncio event loop) ────────────────────────┐
- │ validate path ─▶ route match ─▶ rate limit ─▶ read body ─▶ cache lookup (GET)  │
- │       ─▶ healthy upstream (round-robin) ─▶ circuit breaker ─▶ forward          │
- │          (deadline + safe retries) ─▶ cache fill ─▶ response (hop-by-hop out)  │
- │ metrics + JSON access log on every request                                     │
- └───────────┬──────────────────────────────────────────────────┬─────────────────┘
-             │ token buckets, shared cache                      │ HTTP (pooled httpx)
-             ▼                                                  ▼
-          Redis                                        backend-a   backend-b
-             Prometheus scrapes /metrics ──▶ Grafana dashboard
+ client ──▶ Admission control (in-flight limit, FIFO queue, cheap 503) ──▶ header limits ──▶ request id/log/metrics
+              │
+              ▼
+   route (longest prefix) ─▶ rate limit (Redis Lua) ─▶ read body (≤1 MiB) ─▶ cache lookup ─┬─ hit ──▶ response
+                                                                                             └─ miss ─▶ single-flight
+              ┌──────────────────────────────────────────────────────────────────────────────────────────┘
+              ▼
+   pick upstream (round-robin | least-request; healthy; breaker allows) ─▶ send (httpx per-phase timeouts,
+   cooperative attempt budget) ─▶ safe retry? (GET/HEAD/OPTIONS, deadline, retry budget) ─▶ cache fill ─▶ response
 ```
 
-Details: [ARCHITECTURE.md](docs/ARCHITECTURE.md) · API, errors and config:
+Details: [ARCHITECTURE.md](docs/ARCHITECTURE.md) · API, errors, config:
 [API_AND_CONFIG.md](docs/API_AND_CONFIG.md) · Decisions:
 [ADR-001](docs/ADR-001-technology-choices.md)
 
-## Tech stack
-
-Python 3.12+ · FastAPI/Starlette · Uvicorn (uvloop, httptools) · HTTPX ·
-redis-py (asyncio) + Lua · Pydantic v2 + PyYAML · prometheus-client ·
-pytest, pytest-asyncio, fakeredis · Ruff · Docker Compose · Prometheus ·
-Grafana · k6 · GitHub Actions
-
-## Quick start (Docker, everything included)
+## Quick start (Docker)
 
 Prerequisites: Docker Desktop (or Docker Engine with Compose v2).
 
@@ -69,157 +119,73 @@ scripts/smoke_test.sh            # waits for readiness, then runs end-to-end che
 
 | URL | What |
 |---|---|
-| <http://localhost:8080> | Relay gateway |
+| <http://localhost:8080> | Relay |
 | <http://localhost:3000> | Grafana, dashboard "Relay API Gateway" (anonymous read-only) |
 | <http://localhost:9090> | Prometheus |
-| <http://localhost:8001>, <http://localhost:8002> | Mock backends (for direct comparison and failure injection) |
+| <http://localhost:8001>, <http://localhost:8002> | Mock backends (direct baseline and failure injection) |
 
 All ports bind to `127.0.0.1`. Stop with
-`docker compose --profile multi --profile bench down`.
+`docker compose --profile multi --profile bench --profile scale down`.
 
 ### Try it
 
 ```bash
-# round-robin across two backends
-for i in 1 2 3 4; do curl -s localhost:8080/api/bench-ha/items | jq -r .instance; done
-
-# cache: MISS then HIT
-curl -si 'localhost:8080/api/catalog/items?id=1' | grep -i x-relay-cache
-curl -si 'localhost:8080/api/catalog/items?id=1' | grep -i -E 'x-relay-cache|^age'
-
-# rate limit: /api/orders allows a burst of 5, then 1 request/s
-for i in $(seq 1 8); do curl -s -o /dev/null -w '%{http_code} ' localhost:8080/api/orders/x; done; echo
-
-# failure injection: backend-b starts failing; GETs are retried on backend-a
-curl -s -XPOST localhost:8002/__mock/config -d '{"fail_status":503,"healthy":false}'
-curl -s localhost:8080/__relay/routes | jq '.routes[] | select(.id=="bench-ha")'
+for i in 1 2 3 4; do curl -s localhost:8080/api/bench-ha/items | jq -r .instance; done   # round-robin
+curl -si 'localhost:8080/api/catalog/items?id=1' | grep -i x-relay-cache                  # MISS, then HIT
+for i in $(seq 1 8); do curl -s -o /dev/null -w '%{http_code} ' localhost:8080/api/orders/x; done; echo  # 429s
+curl -s -XPOST localhost:8002/__mock/config -d '{"fail_status":503,"healthy":false}'      # break backend-b
+curl -s localhost:8080/__relay/routes | jq '.routes[] | select(.id=="bench-ha")'          # breaker/health
 curl -s -XPOST localhost:8002/__mock/reset
-
-# errors use one stable JSON contract
-curl -s localhost:8080/nope
-# {"error":{"code":"route_not_found","message":"No configured route matches this path.","request_id":"..."}}
 ```
 
-A full walkthrough is in [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md).
+A full walkthrough: [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md).
 
-## Local development (no Docker needed for most tests)
-
-Prerequisites: Python 3.12+.
+## Verify it yourself
 
 ```bash
-scripts/dev.sh setup        # .venv + pinned dependencies (requirements-dev.lock)
-scripts/dev.sh test         # full suite; Redis tests use fakeredis
-scripts/dev.sh lint         # ruff check + format check
+scripts/verify.sh     # lint, mypy --strict, pip-audit, full tests vs a real Redis, Docker stack + smoke
 ```
 
-To also run every Redis test against a real Redis (as CI does):
+It writes a timestamped log to `verification/`, so the evidence is your own
+terminal output. Benchmarks: `scripts/bench_matrix.py` (about 2 h),
+`scripts/chaos_timeline.py` (about 30 min), `scripts/ab_compare.py`. Run them
+with the laptop **on AC power** (`caffeinate -s` only prevents sleep on AC).
+
+## Local development
 
 ```bash
-scripts/dev.sh redis                          # throwaway redis:7.4 on 127.0.0.1:6390
+scripts/dev.sh setup        # .venv + pinned dependencies
+scripts/dev.sh test         # full suite (Redis tests use fakeredis unless REDIS_URL is set)
+scripts/dev.sh redis        # throwaway Redis on 127.0.0.1:6390, then:
 REDIS_URL=redis://127.0.0.1:6390/15 .venv/bin/pytest --cov
+.venv/bin/mypy              # strict type check
+.venv/bin/relay --config config/routes.yaml --check   # validate a config file
 ```
 
-Run the gateway on its own: `RELAY_CONFIG=path/to/routes.yaml .venv/bin/relay`.
-Validate a config file: `.venv/bin/relay --config config/routes.yaml --check`.
+## Tech stack
 
-### Configuration example
-
-```yaml
-redis:
-  url: "redis://redis:6379/0"          # or RELAY_REDIS_URL; secrets stay out of YAML
-defaults:
-  retries: { max_attempts: 2, retry_methods: [GET, HEAD, OPTIONS] }
-  circuit_breaker: { failure_threshold: 5, recovery_timeout_seconds: 10 }
-routes:
-  - id: catalog
-    path_prefix: /api/catalog
-    upstreams:
-      - { id: catalog-a, url: "http://backend-a:8001" }
-      - { id: catalog-b, url: "http://backend-b:8002" }
-    rate_limit: { capacity: 60, refill_rate_per_second: 10 }
-    cache: { enabled: true, ttl_seconds: 10 }
-```
-
-Invalid config fails at startup with the exact field and reason. For example,
-putting `POST` in `retry_methods` is rejected, because Relay never retries
-writes. Full reference: [API_AND_CONFIG.md](docs/API_AND_CONFIG.md).
-
-## Testing
-
-```bash
-REDIS_URL=redis://127.0.0.1:6390/15 .venv/bin/pytest --cov
-```
-
-* **237 tests**, covering unit, integration over real sockets, concurrency,
-  and failure injection. Every Redis test runs against both fakeredis and a
-  real Redis 7.4.
-* Measured branch coverage for `relay` + `mock_backend`: **96%**.
-* Highlights: a model-based LRU test against `OrderedDict`; 60 concurrent
-  requests admitted exactly at bucket capacity, including across two gateway
-  instances; a half-open breaker admitting exactly 1 of 20 concurrent probes;
-  a cancelled probe releasing its slot; POST/PUT/PATCH/DELETE never retried;
-  metric labels never containing paths, queries or IPs.
-* The requirement-to-test mapping is in [TEST_PLAN.md](docs/TEST_PLAN.md).
-
-## Benchmarks (measured)
-
-k6 in Docker on an Apple M4 Pro laptop. Median of 3 runs; one Uvicorn worker.
-Full method, environment and ranges are in the
-[benchmark report](docs/BENCHMARK_REPORT.md), with raw output in
-[`benchmarks/results/20261025T025934Z/`](benchmarks/results/20261025T025934Z/SUMMARY.md).
-
-| Scenario (10 VUs, 60 s) | Requests/s | p50 | p95 | p99 |
-|---|---|---|---|---|
-| Direct to backend | 19,380 | 0.43 ms | 0.87 ms | 1.04 ms |
-| Through Relay, uncached | 1,402 | 5.38 ms | 14.50 ms | 41.22 ms |
-| Through Relay, cached (99.9% hits) | 6,960 | 1.23 ms | 2.50 ms | 2.79 ms |
-
-* **Overhead is real:** uncached requests pay for a Python proxy hop, and
-  Relay is CPU-bound on one core. The mock backend does almost no work, so
-  this is a worst-case ratio.
-* **Caching** gives about 5× the uncached throughput for repeated GETs.
-* **Failure injection** (one of two backends failing for 30 s): **0.000%**
-  client-visible errors in all 3 runs, with 7 retries and the breaker going
-  closed → open → half-open → closed.
-* **Two gateways sharing Redis** admitted 34 requests per run against a
-  ceiling of 35.
-* **A profiling-driven fix** (a missing `sniffio` caused a failed import on
-  every request) raised uncached throughput by about 30%.
-
-Reproduce: `scripts/run_benchmarks.sh` (~35 min) or see
-[benchmarks/README.md](benchmarks/README.md).
-
-## Monitoring
-
-`docker compose up -d` provisions Prometheus (scraping `/metrics` every 5 s)
-and Grafana with the **Relay API Gateway** dashboard: request rate, 5xx
-error rate, p50/p95/p99 latency, cache hit ratio and lookups, rate-limit
-decisions, upstream health, circuit-breaker state, retries, Redis errors, and
-in-flight requests. The dashboard JSON is generated by
-`scripts/build_dashboard.py`.
+Python 3.12+ · FastAPI/Starlette · Uvicorn (uvloop, httptools) · HTTPX ·
+redis-py (asyncio) + Lua · Pydantic v2 · prometheus-client · pytest,
+Hypothesis, fakeredis, mutmut · Ruff, mypy, pip-audit · Docker Compose ·
+Prometheus · Grafana · k6 · NGINX (benchmark baseline) · GitHub Actions
 
 ## Limitations
 
-* A single process on one event loop (one CPU core). Multiple workers would
-  each have their own LRU, breakers and health state.
-* Responses are **buffered** (capped at 10 MiB by default), not streamed. No
-  WebSockets, HTTP/2 upstreams, or gRPC.
-* Caching implements a documented, conservative subset of HTTP caching. No
-  revalidation, `Expires`, or request coalescing.
+* Single process, single core per instance; scale by adding instances (each
+  keeps its own LRU, breakers, and health state; rate limits stay global).
+* Responses are buffered (10 MiB cap), not streamed. No WebSockets or HTTP/2
+  upstreams.
+* The cache implements a documented, conservative subset of HTTP caching.
 * No TLS termination or client authentication; local demo only.
-
-## Future improvements
-
-Single-flight request coalescing for cache misses · streaming responses ·
-a retry budget · per-route header allowlists · shared/outlier-based ejection
-across instances · comparing aiohttp as the upstream client.
+* Static admission limit (no adaptive AIMD/gradient limit yet).
 
 ## Project docs
 
 [Architecture](docs/ARCHITECTURE.md) · [API & config](docs/API_AND_CONFIG.md) ·
-[Security](docs/SECURITY.md) · [Test plan](docs/TEST_PLAN.md) ·
-[Benchmark report](docs/BENCHMARK_REPORT.md) · [Demo script](docs/DEMO_SCRIPT.md) ·
-[Interview guide](docs/INTERVIEW_GUIDE.md) · [ADR-001](docs/ADR-001-technology-choices.md) ·
+[Benchmark report](docs/BENCHMARK_REPORT.md) · [Audit](docs/AUDIT.md) ·
+[Quality evidence](docs/QUALITY.md) · [Test plan](docs/TEST_PLAN.md) ·
+[Security](docs/SECURITY.md) · [Interview guide](docs/INTERVIEW_GUIDE.md) ·
+[Demo script](docs/DEMO_SCRIPT.md) · [ADR-001](docs/ADR-001-technology-choices.md) ·
 [Implementation status](docs/IMPLEMENTATION_STATUS.md) · [Original spec](PROJECT_SPEC.md)
 
 ## License

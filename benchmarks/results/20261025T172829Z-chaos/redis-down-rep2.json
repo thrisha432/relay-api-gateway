@@ -1,0 +1,26 @@
+{
+  "scenario": "redis-down",
+  "description": "Redis container stopped on a rate-limited route (fail-closed policy), then started",
+  "rep": 2,
+  "events_s": {
+    "fault": 20.000354051589966,
+    "recover": 45.000340938568115
+  },
+  "vm_clock_offset_s": 0.053,
+  "baseline_p99_ms": 5.0,
+  "fault_window_requests": 7493,
+  "fault_window_errors": 7473,
+  "fault_window_error_pct": 99.733,
+  "fault_window_max_p99_ms": 1000.0,
+  "after_recovery_errors": 47,
+  "first_error_s": 20,
+  "last_error_s": 45,
+  "error_free_after_s": 1,
+  "total_requests": 20701,
+  "total_errors": 7520,
+  "gateway_counter_deltas": {
+    "relay_rate_limit_decisions_total{decision=\"allowed\"}": 13481.0,
+    "relay_rate_limit_decisions_total{decision=\"fail_closed\"}": 7520.0,
+    "relay_upstream_requests_total{outcome=\"2xx\",upstream=\"bench-limited-a\"}": 13481.0
+  }
+}

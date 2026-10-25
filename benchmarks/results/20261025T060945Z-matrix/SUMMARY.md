@@ -69,27 +69,27 @@ k6: grafana/k6:1.1.0 in the same Docker network; mock backend: 1 uvicorn worker
 
 | Cell | Req/s median (min-max) | p50 ms | p99 ms | Errors % | Dropped iterations |
 |---|---|---|---|---|---|
-| openloop-nginx-rate500 | 500 (500-500) | 0.36 | 1.75 | 0.000 | 0 |
-| openloop-relay-uncached-rate500 | 500 (500-500) | 0.93 | 4.17 | 0.000 | 0 |
-| openloop-relay-unlimited-rate500 | 500 (500-500) | 0.91 | 3.98 | 0.010 | 0 |
-| openloop-nginx-rate1000 | 1,000 (1,000-1,000) | 0.36 | 1.42 | 0.000 | 0 |
-| openloop-relay-uncached-rate1000 | 1,000 (993-1,000) | 0.90 | 20.86 | 0.000 | 0 |
-| openloop-relay-unlimited-rate1000 | 1,000 (800-1,000) | 0.35 | 8.28 | 93.954 | 0 |
-| openloop-nginx-rate1500 | 1,500 (1,500-1,500) | 0.28 | 1.47 | 0.000 | 0 |
-| openloop-relay-uncached-rate1500 | 1,490 (1,489-1,500) | 115.64 | 364.34 | 35.319 | 0 |
-| openloop-relay-unlimited-rate1500 | 1,500 (1,152-1,500) | 0.33 | 15.43 | 98.051 | 0 |
-| openloop-nginx-rate2000 | 2,000 (2,000-2,000) | 0.31 | 1.12 | 0.000 | 0 |
-| openloop-relay-uncached-rate2000 | 1,986 (1,982-1,987) | 105.80 | 360.72 | 53.750 | 0 |
-| openloop-relay-unlimited-rate2000 | 2,000 (1,646-2,000) | 0.33 | 1.23 | 100.000 | 0 |
-| openloop-nginx-rate2500 | 2,500 (2,500-2,500) | 0.30 | 1.04 | 0.000 | 0 |
-| openloop-relay-uncached-rate2500 | 2,472 (2,471-2,483) | 105.02 | 364.20 | 63.457 | 214 |
-| openloop-relay-unlimited-rate2500 | 2,500 (2,292-2,500) | 0.34 | 2.11 | 100.000 | 0 |
-| openloop-nginx-rate3000 | 3,000 (3,000-3,000) | 0.28 | 1.01 | 0.000 | 0 |
-| openloop-relay-uncached-rate3000 | 2,958 (2,956-2,980) | 104.42 | 358.08 | 70.269 | 419 |
-| openloop-relay-unlimited-rate3000 | 3,000 (1,896-3,000) | 0.36 | 1.94 | 100.000 | 0 |
-| openloop-nginx-rate3500 | 3,500 (3,499-3,500) | 0.28 | 1.15 | 0.000 | 0 |
-| openloop-relay-uncached-rate3500 | 3,428 (3,426-3,468) | 104.37 | 374.18 | 76.685 | 952 |
-| openloop-relay-unlimited-rate3500 | 3,500 (2,376-3,500) | 0.41 | 2.53 | 100.000 | 0 |
+| openloop-nginx-rate500 | 500 (500-500) | 0.34 | 1.94 | 0.000 | 0 |
+| openloop-relay-uncached-rate500 | 500 (500-500) | 0.89 | 6.12 | 0.000 | 0 |
+| openloop-relay-unlimited-rate500 | 500 (500-500) | 0.87 | 6.47 | 0.000 | 0 |
+| openloop-nginx-rate1000 | 1,000 (1,000-1,000) | 0.29 | 1.25 | 0.000 | 0 |
+| openloop-relay-uncached-rate1000 | 1,000 (1,000-1,000) | 0.86 | 33.38 | 0.000 | 0 |
+| openloop-relay-unlimited-rate1000 | 908 (881-1,000) | 0.92 | 2309.78 | 24.478 | 1824 |
+| openloop-nginx-rate1500 | 1,500 (1,500-1,500) | 0.30 | 1.29 | 0.000 | 0 |
+| openloop-relay-uncached-rate1500 | 1,489 (1,488-1,490) | 120.38 | 370.60 | 35.369 | 0 |
+| openloop-relay-unlimited-rate1500 | 1,327 (1,308-1,339) | 0.34 | 1854.07 | 95.627 | 3448 |
+| openloop-nginx-rate2000 | 2,000 (2,000-2,000) | 0.32 | 1.15 | 0.000 | 0 |
+| openloop-relay-uncached-rate2000 | 1,983 (1,982-1,984) | 105.71 | 383.25 | 53.818 | 60 |
+| openloop-relay-unlimited-rate2000 | 1,608 (1,600-1,608) | 0.36 | 2281.07 | 94.618 | 7848 |
+| openloop-nginx-rate2500 | 2,500 (2,500-2,500) | 0.31 | 1.08 | 0.000 | 0 |
+| openloop-relay-uncached-rate2500 | 2,467 (2,461-2,469) | 105.36 | 396.36 | 67.105 | 311 |
+| openloop-relay-unlimited-rate2500 | 1,981 (1,582-2,025) | 0.39 | 1982.45 | 96.361 | 10372 |
+| openloop-nginx-rate3000 | 3,000 (3,000-3,000) | 0.28 | 1.14 | 0.000 | 0 |
+| openloop-relay-uncached-rate3000 | 2,948 (2,944-2,954) | 104.71 | 386.46 | 72.780 | 631 |
+| openloop-relay-unlimited-rate3000 | 2,063 (1,870-2,469) | 0.42 | 2175.35 | 96.757 | 18743 |
+| openloop-nginx-rate3500 | 3,500 (3,500-3,500) | 0.28 | 1.16 | 0.000 | 0 |
+| openloop-relay-uncached-rate3500 | 3,430 (3,421-3,430) | 104.25 | 362.89 | 76.067 | 896 |
+| openloop-relay-unlimited-rate3500 | 2,507 (2,132-2,758) | 0.47 | 2173.11 | 97.794 | 19848 |
 
 ## Horizontal scaling (60 VUs)
 
@@ -129,6 +129,34 @@ k6: grafana/k6:1.1.0 in the same Docker network; mock backend: 1 uvicorn worker
 
 | Cell | Req/s median (min-max) | p50 ms | Errors % | Upstream requests per client request |
 |---|---|---|---|---|
-| brownout-relay-budget-vus20 | 979 (956-1,564) | 11.61 | 4.233 | 1.2074 |
-| brownout-relay-nobudget-vus20 | 1,030 (1,008-1,613) | 10.21 | 0.000 | 1.2505 |
+| brownout-relay-budget-vus20 | 1,005 (1,001-1,018) | 11.20 | 4.283 | 1.2072 |
+| brownout-relay-nobudget-vus20 | 1,005 (998-1,024) | 10.51 | 0.000 | 1.2502 |
+| brownout-relay-budget-single-vus20 | 1,026 (965-1,054) | 10.18 | 39.646 | 1.2071 |
+| brownout-relay-nobudget-single-vus20 | 663 (662-667) | 10.15 | 11.305 | 1.7739 |
+
+## Chaos timelines (300 req/s open loop; fault from t=20 s to t=45 s)
+
+| Scenario | Reps | Fault-window errors % (per rep) | Max p99 in fault window ms (per rep) | Errors after recovery (per rep) |
+|---|---|---|---|---|
+| backend-down | 3 | 0.0, 0.0, 0.0 | 25.0, 25.0, 25.0 | 0, 0, 0 |
+| backend-hang | 3 | 6.049, 6.008, 6.021 | 2500.0, 2500.0, 2500.0 | 0, 0, 0 |
+| backend-hang-lr | 3 | 0.0, 0.0, 0.0 | 25.0, 25.0, 25.0 | 0, 0, 0 |
+| backend-503 | 3 | 0.0, 0.0, 0.0 | 25.0, 10.0, 25.0 | 0, 0, 0 |
+| total-outage | 3 | 100.0, 100.0, 100.0 | 5.0, 5.0, 50.0 | 1495, 1494, 1498 |
+| redis-down | 3 | 99.746, 99.733, 99.439 | 1000.0, 1000.0, 1000.0 | 54, 47, 46 |
+| gateway-restart | 3 | 4.173, 4.187, 4.08 | 25.0, 50.0, 50.0 | 0, 0, 0 |
+
+![chaos_backend-503](charts/chaos_backend-503.png)
+
+![chaos_backend-down](charts/chaos_backend-down.png)
+
+![chaos_backend-hang-lr](charts/chaos_backend-hang-lr.png)
+
+![chaos_backend-hang](charts/chaos_backend-hang.png)
+
+![chaos_gateway-restart](charts/chaos_gateway-restart.png)
+
+![chaos_redis-down](charts/chaos_redis-down.png)
+
+![chaos_total-outage](charts/chaos_total-outage.png)
 

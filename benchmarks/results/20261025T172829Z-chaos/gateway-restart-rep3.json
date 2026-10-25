@@ -1,0 +1,22 @@
+{
+  "scenario": "gateway-restart",
+  "description": "the Relay container is restarted under traffic (SIGTERM, then start)",
+  "rep": 3,
+  "events_s": {
+    "fault": 20.005168914794922,
+    "recover": 45.00519776344299
+  },
+  "vm_clock_offset_s": 0.055,
+  "baseline_p99_ms": 5.0,
+  "fault_window_requests": 7500,
+  "fault_window_errors": 306,
+  "fault_window_error_pct": 4.08,
+  "fault_window_max_p99_ms": 50.0,
+  "after_recovery_errors": 0,
+  "first_error_s": 20,
+  "last_error_s": 21,
+  "error_free_after_s": 0,
+  "total_requests": 20709,
+  "total_errors": 306,
+  "gateway_counter_deltas": "n/a (process restarted)"
+}

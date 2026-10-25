@@ -1,0 +1,31 @@
+{
+  "scenario": "backend-down",
+  "description": "backend-b container stopped (connection refused), then started",
+  "rep": 1,
+  "events_s": {
+    "fault": 20.005197525024414,
+    "recover": 45.00341486930847
+  },
+  "vm_clock_offset_s": 0.047,
+  "baseline_p99_ms": 5.0,
+  "fault_window_requests": 7500,
+  "fault_window_errors": 0,
+  "fault_window_error_pct": 0.0,
+  "fault_window_max_p99_ms": 25.0,
+  "after_recovery_errors": 0,
+  "first_error_s": null,
+  "last_error_s": null,
+  "error_free_after_s": 0,
+  "total_requests": 20782,
+  "total_errors": 0,
+  "gateway_counter_deltas": {
+    "relay_circuit_breaker_rejections_total{upstream=\"bench-ha-b\"}": 884.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"closed\",to_state=\"open\",upstream=\"bench-ha-b\"}": 1.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"half_open\",to_state=\"closed\",upstream=\"bench-ha-b\"}": 1.0,
+    "relay_circuit_breaker_transitions_total{from_state=\"open\",to_state=\"half_open\",upstream=\"bench-ha-b\"}": 1.0,
+    "relay_retries_total{reason=\"connect_error\"}": 5.0,
+    "relay_upstream_requests_total{outcome=\"2xx\",upstream=\"bench-ha-a\"}": 14699.0,
+    "relay_upstream_requests_total{outcome=\"2xx\",upstream=\"bench-ha-b\"}": 6302.0,
+    "relay_upstream_requests_total{outcome=\"connect_error\",upstream=\"bench-ha-b\"}": 5.0
+  }
+}

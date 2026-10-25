@@ -21,6 +21,7 @@ matplotlib.use("Agg")
 import contextlib
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 # Fixed categorical order (identity follows the entity, never its rank).
@@ -29,6 +30,7 @@ SERIES = {
     "nginx": ("#eb6834", "s", "NGINX (1 worker)"),
     "relay-uncached": ("#1baf7a", "^", "Relay, uncached"),
     "relay-cached": ("#eda100", "D", "Relay, cached (warm)"),
+    "relay-unlimited": ("#e87ba4", "v", "Relay, admission control off"),
 }
 STATUS_COLORS = {"2xx": "#1baf7a", "429": "#eda100", "5xx": "#e34948", "conn": "#6250d6"}
 
@@ -199,49 +201,48 @@ def chart_latency(rows, out: Path, runs: list[dict]) -> None:
 
 
 def chart_openloop(rows, out: Path) -> None:
+    """Goodput (successful responses/s) and p99 vs offered load.
+
+    Goodput, not "achieved" throughput: a shed 503 is a response, but not a
+    useful one, and counting it would make overload look free.
+    """
     data = [r for r in rows if r["experiment"] == "openloop"]
+    modes = ("nginx", "relay-uncached", "relay-unlimited")
     fig, (a, b) = plt.subplots(1, 2, figsize=(10, 3.8))
-    for mode in ("nginx", "relay-uncached"):
+    for mode in modes:
         pts = sorted((r for r in data if r["mode"] == mode), key=lambda r: r["rate"])
+        if not pts:
+            continue
         color, marker, label = SERIES[mode]
-        a.plot(
-            [p["rate"] for p in pts],
-            [p["p99_ms_median"] for p in pts],
-            color=color,
-            marker=marker,
-            label=f"{label} p99",
+        if mode == "relay-uncached":
+            label = "Relay, admission control on (default)"
+        xs = [p["rate"] for p in pts]
+        good = [p["rps_median"] * (1 - p["error_pct_median"] / 100) for p in pts]
+        a.plot(xs, good, color=color, marker=marker, label=label)
+        a.annotate(
+            f"{good[-1]:,.0f}",
+            (xs[-1], good[-1]),
+            textcoords="offset points",
+            xytext=(6, 0),
+            va="center",
+            color=INK2,
+            fontsize=8,
         )
-        a.plot(
-            [p["rate"] for p in pts],
-            [p["p50_ms_median"] for p in pts],
-            color=color,
-            marker=marker,
-            linestyle="--",
-            alpha=0.7,
-            label=f"{label} p50",
-        )
-        b.plot(
-            [p["rate"] for p in pts],
-            [p["rps_median"] for p in pts],
-            color=color,
-            marker=marker,
-            label=label,
-        )
+        b.plot(xs, [p["p99_ms_median"] for p in pts], color=color, marker=marker, label=label)
     rates = sorted({r["rate"] for r in data})
-    b.plot(rates, rates, color=INK2, linestyle=":", linewidth=1, label="offered = achieved")
+    a.plot(rates, rates, color=INK2, linestyle=":", linewidth=1, label="offered (ideal goodput)")
     a.set(
-        title="Latency vs offered load (open loop)",
+        title="Goodput vs offered load (open loop)",
         xlabel="offered load (req/s)",
-        ylabel="latency (ms, log)",
-        yscale="log",
+        ylabel="successful responses / s",
     )
     b.set(
-        title="Achieved vs offered throughput",
+        title="p99 latency vs offered load",
         xlabel="offered load (req/s)",
-        ylabel="achieved (req/s)",
+        ylabel="p99 (ms, log)",
+        yscale="log",
     )
-    a.legend(fontsize=7)
-    b.legend(fontsize=8)
+    legend_below(fig, a)
     save(fig, out, "open_loop.png")
 
 
@@ -366,6 +367,8 @@ def chart_chaos(chaos: Path, out: Path) -> None:
             t, [float(r["p99_ms"]) for r in rows], color=INK2, linewidth=1.5, label="p99 (bucketed)"
         )
         b.set_yscale("log")
+        b.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+        b.yaxis.set_minor_formatter(FuncFormatter(lambda v, _: ""))
         for ax in (a, b):
             ax.axvspan(
                 meta["events_s"]["fault"],
@@ -375,8 +378,9 @@ def chart_chaos(chaos: Path, out: Path) -> None:
                 linewidth=0,
             )
         a.set(title=f"{scenario}: {meta['description']}", ylabel="requests / s")
-        a.legend(loc="lower left", fontsize=7, ncols=4)
+        a.grid(axis="x", visible=False)  # grid lines would cut through the bars
         b.set(xlabel="seconds (shaded = fault injected)", ylabel="p99 ms (log)")
+        legend_below(fig, a)
         save(fig, out, f"chaos_{scenario}.png")
 
 

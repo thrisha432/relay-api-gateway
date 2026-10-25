@@ -1,0 +1,1 @@
+Open-loop cells from the main run, superseded by the isolated re-run in ../../../20261025T072742Z-matrix (merged into ../runs.csv). These cells were not isolated: the relay-unlimited gateway is not reachable from the host, so the breaker check between cells could not verify it, and a collapse in one cell carried into the next. Kept for transparency, not used.
