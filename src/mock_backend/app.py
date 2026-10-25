@@ -30,12 +30,15 @@ class MockState:
     healthy: bool = True
     delay_ms: int = 0
     fail_status: int | None = None
+    # With fail_status set: fail only every Nth request (deterministic brownout).
+    fail_every: int = 1
     requests: Counter[str] = field(default_factory=Counter)
 
     def reset(self) -> None:
         self.healthy = True
         self.delay_ms = 0
         self.fail_status = None
+        self.fail_every = 1
         self.requests.clear()
 
 
@@ -62,6 +65,8 @@ def create_mock_app(instance: str | None = None) -> Starlette:
             state.delay_ms = _bounded_int(str(body["delay_ms"]), MAX_DELAY_MS)
         if "fail_status" in body:
             state.fail_status = int(body["fail_status"]) if body["fail_status"] else None
+        if "fail_every" in body:
+            state.fail_every = max(1, int(body["fail_every"]))
         return JSONResponse(_describe(state))
 
     async def reset(_: Request) -> Response:
@@ -77,7 +82,8 @@ def create_mock_app(instance: str | None = None) -> Starlette:
         delay = _bounded_int(params.get("delay_ms"), MAX_DELAY_MS) or state.delay_ms
         if delay:
             await asyncio.sleep(delay / 1000)
-        if state.fail_status:
+        total = sum(state.requests.values())
+        if state.fail_status and total % state.fail_every == 0:
             return JSONResponse(
                 {"error": "injected", "instance": state.instance}, state.fail_status
             )
@@ -127,6 +133,7 @@ def _describe(state: MockState) -> dict[str, object]:
         "healthy": state.healthy,
         "delay_ms": state.delay_ms,
         "fail_status": state.fail_status,
+        "fail_every": state.fail_every,
         "requests": dict(state.requests),
     }
 

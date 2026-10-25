@@ -40,6 +40,7 @@ from relay.cache.response_cache import (
     request_bypass_reason,
     response_ttl,
 )
+from relay.cache.singleflight import SingleFlight
 from relay.client_identity import ClientIdentityResolver
 from relay.config import RelayConfig, RouteConfig, UpstreamConfig
 from relay.errors import (
@@ -75,6 +76,7 @@ from relay.rate_limiter import RateLimitDecision, RateLimiterUnavailable, RedisR
 from relay.redis_client import create_redis, ping
 from relay.resilience.circuit_breaker import STATE_VALUES, BreakerState, CircuitBreaker, Permit
 from relay.resilience.retry import RetryPolicy
+from relay.resilience.retry_budget import RetryBudget
 from relay.resilience.timeouts import Deadline
 from relay.routing import InvalidPathError, RouteMatch, Router, validate_raw_path
 
@@ -155,7 +157,17 @@ class Gateway:
             self.cache = LocalResponseCache(
                 config.cache.max_entries, on_evict=self.metrics.cache_evictions_total.inc
             )
+        self._singleflight: SingleFlight[str, UpstreamResponse] = SingleFlight()
         self.retry_policies = {r.id: RetryPolicy(r.retries) for r in config.routes}
+        self.retry_budgets = {
+            r.id: RetryBudget(
+                r.retries.budget_ratio,
+                r.retries.budget_min_retries_per_second,
+                r.retries.budget_max_balance,
+            )
+            for r in config.routes
+            if r.retries.budget_enabled
+        }
         self.breakers = {
             (r.id, u.id): CircuitBreaker(
                 r.circuit_breaker, on_transition=self._breaker_listener(r.id, u.id)
@@ -297,11 +309,21 @@ class Gateway:
             if cached is not None:
                 return self._cached_response(cached)
 
-        result = await self._forward(preq)
+        if key is not None and preq.route.cache.coalesce:
+            # Concurrent misses for one key share a single upstream fetch.
+            result, shared = await self._singleflight.do(
+                key, lambda: self._fetch_and_fill(preq, key)
+            )
+            if shared:
+                ctx.cache = "coalesced"
+                ctx.upstream_id = result.upstream_id
+                self.metrics.cache_coalesced_total.labels(preq.route.id).inc()
+        elif key is not None:
+            result = await self._fetch_and_fill(preq, key)
+        else:
+            result = await self._forward(preq)
         response = build_client_response(result, preq.method)
         if preq.route.cache.enabled:
-            if key is not None:
-                await self._cache_fill(preq, key, result)
             response.raw_headers.append((CACHE_HEADER, ctx.cache.upper().encode()))
         if decision is not None:
             response.raw_headers.extend(_rate_limit_headers(decision))
@@ -398,6 +420,11 @@ class Gateway:
         self.metrics.cache_requests_total.labels(route.id, preq.ctx.cache).inc()
         return key, cached
 
+    async def _fetch_and_fill(self, preq: ProxyRequest, key: str) -> UpstreamResponse:
+        result = await self._forward(preq)
+        await self._cache_fill(preq, key, result)
+        return result
+
     async def _cache_fill(self, preq: ProxyRequest, key: str, result: UpstreamResponse) -> None:
         ttl = response_ttl(result.status, result.headers, len(result.body), preq.route.cache)
         if ttl is None:
@@ -436,6 +463,9 @@ class Gateway:
         policy = self.retry_policies[route.id]
         max_attempts = policy.attempts_for(preq.method)
         deadline = Deadline(route.timeouts.request_seconds)
+        retry_budget = self.retry_budgets.get(route.id)
+        if retry_budget is not None:
+            retry_budget.record_request()
         tried: set[str] = set()
         last_response: UpstreamResponse | None = None
         last_error: ErrorSpec | None = None
@@ -485,6 +515,9 @@ class Gateway:
                 break
             delay = policy.backoff_seconds(attempt)
             if not deadline.can_fit(delay) or await preq.request.is_disconnected():
+                break
+            if retry_budget is not None and not retry_budget.try_spend():
+                self.metrics.retry_budget_exhausted_total.labels(route.id).inc()
                 break
             self.metrics.retries_total.labels(route.id, reason).inc()
             await asyncio.sleep(delay)

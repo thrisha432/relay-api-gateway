@@ -16,7 +16,7 @@ from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from relay.errors import INTERNAL_ERROR
+from relay.errors import HEADERS_TOO_LARGE, INTERNAL_ERROR, MISSING_HOST, error_response
 from relay.logging_config import get_logger
 from relay.models import RequestContext
 
@@ -130,3 +130,35 @@ def _log_access(ctx: RequestContext, method: str, status: int, duration: float) 
     if ctx.error_code:
         fields["error_code"] = ctx.error_code
     logger.info("request", extra={"fields": fields})
+
+
+class RequestLimitsMiddleware:
+    """Reject oversized header sets (431) and HTTP/1.1 requests without Host (400).
+
+    Runs inside RequestContextMiddleware so rejections still get a request id,
+    a log line and metrics, and before routing so nothing is forwarded.
+    """
+
+    def __init__(self, app: ASGIApp, max_header_bytes: int, max_header_count: int) -> None:
+        self.app = app
+        self.max_header_bytes = max_header_bytes
+        self.max_header_count = max_header_count
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = scope.get("headers", [])
+        # Count name + value + ": " + CRLF, approximating the wire size.
+        size = sum(len(name) + len(value) + 4 for name, value in headers)
+        spec = None
+        if len(headers) > self.max_header_count or size > self.max_header_bytes:
+            spec = HEADERS_TOO_LARGE
+        elif scope.get("http_version") == "1.1" and not any(n == b"host" for n, _ in headers):
+            spec = MISSING_HOST
+        if spec is None:
+            await self.app(scope, receive, send)
+            return
+        ctx: RequestContext = scope["state"]["relay"]
+        ctx.error_code = spec.code
+        await error_response(spec, ctx.request_id)(scope, receive, send)

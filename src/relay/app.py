@@ -24,7 +24,7 @@ from relay.cache.response_cache import ResponseCache
 from relay.config import RelayConfig, load_config
 from relay.logging_config import configure_logging, get_logger
 from relay.metrics import RelayMetrics, method_label, status_class
-from relay.middleware import RequestContextMiddleware
+from relay.middleware import RequestContextMiddleware, RequestLimitsMiddleware
 from relay.models import OPERATIONAL_ROUTE, RequestContext
 from relay.proxy import Gateway
 
@@ -73,6 +73,12 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.gateway = gateway
+    # add_middleware wraps outward: RequestContext (outermost) -> RequestLimits -> app.
+    app.add_middleware(
+        RequestLimitsMiddleware,
+        max_header_bytes=config.server.max_header_bytes,
+        max_header_count=config.server.max_header_count,
+    )
     app.add_middleware(
         RequestContextMiddleware,
         observer=observe,

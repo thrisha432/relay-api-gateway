@@ -123,6 +123,12 @@ class RelayMetrics:
             ["route", "outcome"],
             registry=r,
         )
+        self.cache_coalesced_total = Counter(
+            "relay_cache_coalesced_total",
+            "Cache misses answered by joining an identical in-flight upstream request.",
+            ["route"],
+            registry=r,
+        )
         self.cache_evictions_total = Counter(
             "relay_cache_evictions_total",
             "Entries evicted from the local LRU because it was full.",
@@ -137,6 +143,12 @@ class RelayMetrics:
         self.retries_exhausted_total = Counter(
             "relay_retries_exhausted_total",
             "Requests that still failed after using every allowed attempt.",
+            ["route"],
+            registry=r,
+        )
+        self.retry_budget_exhausted_total = Counter(
+            "relay_retry_budget_exhausted_total",
+            "Retries skipped because the route's retry budget was empty.",
             ["route"],
             registry=r,
         )

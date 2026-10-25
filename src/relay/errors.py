@@ -26,6 +26,10 @@ INVALID_REQUEST = ErrorSpec(400, "invalid_request", "The request path or headers
 ROUTE_NOT_FOUND = ErrorSpec(404, "route_not_found", "No configured route matches this path.")
 METHOD_NOT_ALLOWED = ErrorSpec(405, "method_not_allowed", "This HTTP method is not supported.")
 PAYLOAD_TOO_LARGE = ErrorSpec(413, "payload_too_large", "The request body exceeds the limit.")
+HEADERS_TOO_LARGE = ErrorSpec(
+    431, "request_headers_too_large", "The request headers exceed the size or count limit."
+)
+MISSING_HOST = ErrorSpec(400, "invalid_request", "HTTP/1.1 requests must include a Host header.")
 RATE_LIMITED = ErrorSpec(429, "rate_limited", "Rate limit exceeded. Retry later.")
 UPSTREAM_CONNECTION_ERROR = ErrorSpec(
     502, "upstream_connection_error", "The upstream service could not be reached."

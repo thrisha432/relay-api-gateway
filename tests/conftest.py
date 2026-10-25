@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import AsyncIterator, Callable
 
@@ -80,3 +81,16 @@ def dead_redis() -> Redis:
     return create_redis(
         RedisConfig(url=url, connect_timeout_seconds=0.2, operation_timeout_seconds=0.5)
     )
+
+
+@pytest.fixture
+def relay_logs(caplog):
+    """Capture records from the 'relay' logger even if configure_logging()
+    disabled propagation earlier in the session."""
+    logger = logging.getLogger("relay")
+    old_level = logger.level
+    logger.addHandler(caplog.handler)
+    logger.setLevel(logging.DEBUG)
+    yield caplog
+    logger.removeHandler(caplog.handler)
+    logger.setLevel(old_level)

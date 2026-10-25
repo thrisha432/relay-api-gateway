@@ -67,6 +67,11 @@ class ServerConfig(_Strict):
     port: int = Field(default=8080, ge=1, le=65535)
     max_request_body_bytes: int = Field(default=1_048_576, ge=0, le=100 * 1024 * 1024)
     max_response_body_bytes: int = Field(default=10 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
+    # Request header limits (431 when exceeded). The HTTP parser itself does
+    # not cap header size, so without these a client could send megabytes of
+    # headers that Relay would forward upstream.
+    max_header_bytes: int = Field(default=32 * 1024, ge=1024, le=1024 * 1024)
+    max_header_count: int = Field(default=100, ge=8, le=10_000)
     # Peers whose X-Forwarded-For header is trusted. Empty means "trust nobody":
     # the client identity is always the direct TCP peer address.
     trusted_proxies: tuple[str, ...] = ()
@@ -137,6 +142,12 @@ class RetryConfig(_Strict):
     retry_methods: tuple[str, ...] = ("GET", "HEAD", "OPTIONS")
     backoff_base_seconds: float = Field(default=0.05, ge=0, le=5)
     backoff_max_seconds: float = Field(default=0.5, ge=0, le=10)
+    # Retry budget (see resilience/retry_budget.py): retries may add at most
+    # budget_ratio x requests (+ a small time-based reserve) of extra load.
+    budget_enabled: bool = True
+    budget_ratio: float = Field(default=0.2, ge=0, le=1)
+    budget_min_retries_per_second: float = Field(default=5.0, ge=0, le=10_000)
+    budget_max_balance: float = Field(default=50.0, ge=1, le=100_000)
 
     @field_validator("retry_methods")
     @classmethod
@@ -226,6 +237,8 @@ class RouteCacheConfig(_Strict):
     allowed_status_codes: tuple[int, ...] = (200,)
     # Request headers that select a representation and are part of the cache key.
     vary_headers: tuple[str, ...] = ("accept", "accept-encoding")
+    # Coalesce concurrent misses for the same key into one upstream request.
+    coalesce: bool = True
 
     @field_validator("vary_headers")
     @classmethod
