@@ -31,3 +31,6 @@ htmlcov/
 
 # Benchmark scratch output (curated results are committed explicitly)
 benchmarks/results/tmp/
+
+# mutation testing workspace
+mutants/

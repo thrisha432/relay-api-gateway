@@ -95,3 +95,21 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+[tool.mutmut]
+# Mutation testing of the pure-logic core (see docs/QUALITY.md).
+source_paths = [
+    "src/relay/cache/lru.py",
+    "src/relay/cache/response_cache.py",
+    "src/relay/cache/singleflight.py",
+    "src/relay/resilience/circuit_breaker.py",
+    "src/relay/resilience/retry.py",
+    "src/relay/resilience/retry_budget.py",
+    "src/relay/resilience/timeouts.py",
+    "src/relay/routing.py",
+    "src/relay/load_balancer.py",
+    "src/relay/client_identity.py",
+    "src/relay/headers.py",
+]
+pytest_add_cli_args_test_selection = ["tests/unit"]
+also_copy = ["tests", "src/relay", "src/mock_backend", "config"]

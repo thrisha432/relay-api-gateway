@@ -113,13 +113,14 @@ def response_ttl(
             return None
     ttl = cfg.ttl_seconds
     for directive in ("s-maxage", "max-age"):
-        raw = cc.get(directive)
-        if raw is not None:
-            try:
-                ttl = min(ttl, float(int(raw)))
-            except ValueError:
-                return None
-            break  # s-maxage takes precedence for shared caches
+        if directive not in cc:
+            continue
+        raw = cc[directive]
+        # Malformed (missing or non-integer value): do not guess, do not cache.
+        if raw is None or not raw.isdigit():
+            return None
+        ttl = min(ttl, float(int(raw)))
+        break  # s-maxage takes precedence for shared caches
     return ttl if ttl > 0 else None
 
 
