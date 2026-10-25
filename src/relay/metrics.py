@@ -192,6 +192,28 @@ class RelayMetrics:
         return generate_latest(self.registry)
 
 
+def count_orphaned_pool_connections(client: object) -> float:
+    """Pooled connections that were assigned but never dialed (httpcore 1.0.x race).
+
+    Read-only introspection of private httpcore state, used only to make the
+    failure mode in docs/AUDIT.md (A16) observable. Returns -1 if the internals
+    are not what this code expects (a future httpcore), never raises.
+    """
+    try:
+        pool = client._transport._pool  # type: ignore[attr-defined]
+        return float(
+            sum(
+                1
+                for c in pool.connections
+                if getattr(c, "_connection", object()) is None
+                and getattr(c, "_connect_failed", None) is False
+                and not c.is_available()
+            )
+        )
+    except Exception:
+        return -1.0
+
+
 class CallbackGauge(Collector):
     """Gauge whose samples are computed at scrape time from a callback.
 

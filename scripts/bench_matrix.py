@@ -46,6 +46,7 @@ MODES: dict[str, tuple[str, str, int, str]] = {
     "relay-uncached-nolog": ("http://relay-nolog:8080", "/api/bench", 100, "relay-nolog"),
     "relay-cached-nolog": ("http://relay-nolog:8080", "/api/bench-cached", 50, "relay-nolog"),
     "relay-pool": ("http://relay-pool:8080", "/api/bench", 100, "relay-pool"),
+    "relay-unlimited": ("http://relay-unlimited:8080", "/api/bench", 100, "relay-unlimited"),
     "relay-coalesce": ("http://relay:8080", "/api/bench-cached", 0, "relay"),
     "relay-nocoalesce": ("http://relay:8080", "/api/bench-nocoalesce", 0, "relay"),
     "relay-budget": ("http://relay:8080", "/api/bench-budget", 100, "relay"),
@@ -92,8 +93,8 @@ def experiments() -> dict[str, list[Cell]]:
         ],
         "openloop": [
             Cell("openloop", m, executor="open", rate=r)
-            for r in (200, 400, 600, 800, 1000, 1200, 1400, 1600)
-            for m in ("nginx", "relay-uncached")
+            for r in (200, 400, 600, 800, 1000, 1200, 1400, 1600, 2000)
+            for m in ("nginx", "relay-uncached", "relay-unlimited")
         ],
         "scaling": [Cell("scaling", "relay-pool", vus=100, instances=n) for n in (1, 2, 4)],
         "ablation": [

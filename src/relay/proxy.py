@@ -49,7 +49,6 @@ from relay.errors import (
     INVALID_REQUEST,
     METHOD_NOT_ALLOWED,
     NO_HEALTHY_UPSTREAM,
-    OVERLOADED,
     PAYLOAD_TOO_LARGE,
     RATE_LIMITED,
     RATE_LIMITER_UNAVAILABLE,
@@ -72,7 +71,12 @@ from relay.headers import (
 from relay.health import HealthChecker, HealthRegistry
 from relay.load_balancer import RoundRobinBalancer
 from relay.logging_config import get_logger
-from relay.metrics import CallbackGauge, RelayMetrics, status_class
+from relay.metrics import (
+    CallbackGauge,
+    RelayMetrics,
+    count_orphaned_pool_connections,
+    status_class,
+)
 from relay.models import RequestContext, UpstreamResponse
 from relay.rate_limiter import RateLimitDecision, RateLimiterUnavailable, RedisRateLimiter
 from relay.redis_client import create_redis, ping
@@ -183,13 +187,25 @@ class Gateway:
         self._owns_redis = redis is None
         self.rate_limiter: RedisRateLimiter | None = None
         self._last_fail_open_log = float("-inf")
-        self._in_flight = 0
         self._lag_task: asyncio.Task[None] | None = None
 
         self.health.add_listener(self._observe_health_change)
         for route in config.routes:
             for upstream in route.upstreams:
                 self.metrics.upstream_healthy.labels(route.id, upstream.id).set(1)
+        self.metrics.register_collector(
+            CallbackGauge(
+                "relay_upstream_pool_unstarted_connections",
+                "Pooled upstream connections assigned but not yet dialed. Normally 0 or "
+                "momentarily small; a value that stays > 0 means leaked slots (AUDIT A16).",
+                [],
+                lambda: (
+                    [((), count_orphaned_pool_connections(self._client))]
+                    if self._client is not None
+                    else []
+                ),
+            )
+        )
         self.metrics.register_collector(
             CallbackGauge(
                 "relay_circuit_breaker_state",
@@ -230,6 +246,16 @@ class Gateway:
                 self.redis,
                 operation_timeout_seconds=self.config.redis.operation_timeout_seconds,
                 on_error=lambda op: self.metrics.redis_errors_total.labels(op).inc(),
+            )
+        if self.config.server.max_in_flight == 0:
+            logger.warning(
+                "admission_control_disabled",
+                extra={
+                    "fields": {
+                        "risk": "unbounded queueing; upstream pool waits can leak connections "
+                        "(docs/AUDIT.md A16, A17)"
+                    }
+                },
             )
         await self.health_checker.start()
         self._lag_task = asyncio.create_task(self._watch_loop_lag(), name="relay-loop-lag")
@@ -307,19 +333,6 @@ class Gateway:
 
     async def _handle(self, request: Request, ctx: RequestContext) -> Response:
         match = self._match(request, ctx)
-        limit = self.config.server.max_in_flight
-        if limit and self._in_flight >= limit:
-            # Shed before doing any work: cheap, immediate, and it keeps the
-            # event loop responsive for the requests already admitted.
-            self.metrics.load_shed_total.labels(match.route.id).inc()
-            raise GatewayError(OVERLOADED, headers={"retry-after": "1"})
-        self._in_flight += 1
-        try:
-            return await self._admitted(request, ctx, match)
-        finally:
-            self._in_flight -= 1
-
-    async def _admitted(self, request: Request, ctx: RequestContext, match: RouteMatch) -> Response:
         decision = None
         if match.route.rate_limit is not None:
             decision = await self._enforce_rate_limit(request, match.route, ctx)

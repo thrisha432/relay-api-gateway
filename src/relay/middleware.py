@@ -16,7 +16,8 @@ from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from relay.errors import HEADERS_TOO_LARGE, INTERNAL_ERROR, MISSING_HOST, error_response
+from relay.config import RESERVED_PATH_PREFIXES
+from relay.errors import HEADERS_TOO_LARGE, INTERNAL_ERROR, MISSING_HOST, OVERLOADED, error_response
 from relay.logging_config import get_logger
 from relay.models import RequestContext
 
@@ -165,3 +166,71 @@ class RequestLimitsMiddleware:
         ctx: RequestContext = scope["state"]["relay"]
         ctx.error_code = spec.code
         await error_response(spec, ctx.request_id)(scope, receive, send)
+
+
+class AdmissionMiddleware:
+    """Load shedding: cap proxied requests in flight; reject the rest fast.
+
+    Outermost middleware on purpose. A rejected request must cost as little
+    as possible, otherwise under overload the CPU spent *rejecting* starves the
+    requests already admitted and goodput collapses. So rejection skips
+    routing, the request context, and the access log (a counter still records
+    it), and sends a small pre-encoded 503. Operational endpoints (/health,
+    /metrics, /__relay) are never shed, so probes keep working under overload.
+
+    Atomic without a lock: the check-and-increment contains no await.
+    """
+
+    def __init__(
+        self, app: ASGIApp, limit: int, on_shed: Callable[[str], None] | None = None
+    ) -> None:
+        self.app = app
+        self.limit = limit
+        self.on_shed = on_shed
+        self.in_flight = 0
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or not self.limit
+            or scope["path"].startswith(RESERVED_PATH_PREFIXES)
+        ):
+            await self.app(scope, receive, send)
+            return
+        if self.in_flight >= self.limit:
+            if self.on_shed:
+                self.on_shed(scope["path"])
+            await _send_overloaded(send)
+            return
+        self.in_flight += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.in_flight -= 1
+
+
+async def _send_overloaded(send: Send) -> None:
+    request_id = uuid.uuid4().hex
+    body = json.dumps(
+        {
+            "error": {
+                "code": OVERLOADED.code,
+                "message": OVERLOADED.message,
+                "request_id": request_id,
+            }
+        }
+    ).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": OVERLOADED.status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after", b"1"),
+                (b"cache-control", b"no-store"),
+                (b"x-request-id", request_id.encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})

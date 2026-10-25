@@ -24,8 +24,12 @@ from relay.cache.response_cache import ResponseCache
 from relay.config import RelayConfig, load_config
 from relay.logging_config import configure_logging, get_logger
 from relay.metrics import RelayMetrics, method_label, status_class
-from relay.middleware import RequestContextMiddleware, RequestLimitsMiddleware
-from relay.models import OPERATIONAL_ROUTE, RequestContext
+from relay.middleware import (
+    AdmissionMiddleware,
+    RequestContextMiddleware,
+    RequestLimitsMiddleware,
+)
+from relay.models import OPERATIONAL_ROUTE, UNMATCHED_ROUTE, RequestContext
 from relay.proxy import Gateway
 
 logger = get_logger("app")
@@ -79,6 +83,11 @@ def create_app(
         max_header_bytes=config.server.max_header_bytes,
         max_header_count=config.server.max_header_count,
     )
+
+    def on_shed(path: str) -> None:
+        match = gateway.router.match(path)
+        metrics.load_shed_total.labels(match.route.id if match else UNMATCHED_ROUTE).inc()
+
     app.add_middleware(
         RequestContextMiddleware,
         observer=observe,
@@ -86,6 +95,8 @@ def create_app(
         on_end=metrics.in_flight.dec,
         access_log=config.server.access_log,
     )
+    # Outermost: shed overload before any per-request work (see AdmissionMiddleware).
+    app.add_middleware(AdmissionMiddleware, limit=config.server.max_in_flight, on_shed=on_shed)
 
     def _ops(request: Request) -> None:
         request.scope["state"]["relay"].route_id = OPERATIONAL_ROUTE

@@ -91,7 +91,7 @@ class ServerConfig(_Strict):
     # system stays down even after load drops (a metastable failure,
     # reproduced in benchmarks/: open-loop sweep). Size it near
     # throughput x acceptable queueing delay. 0 disables the limit.
-    max_in_flight: int = Field(default=128, ge=0, le=100_000)
+    max_in_flight: int = Field(default=64, ge=0, le=100_000)
     upstream_max_connections: int = Field(default=100, ge=1, le=10_000)
     upstream_max_keepalive_connections: int = Field(default=20, ge=0, le=10_000)
 
@@ -399,6 +399,14 @@ class RelayConfig(_Strict):
 
     @model_validator(mode="after")
     def _cross_checks(self) -> Self:
+        server = self.server
+        if server.max_in_flight > server.upstream_max_connections:
+            raise ValueError(
+                f"server.max_in_flight ({server.max_in_flight}) must not exceed "
+                f"server.upstream_max_connections ({server.upstream_max_connections}): "
+                "requests must never wait in the upstream pool queue, where httpcore "
+                "1.0.x can orphan connections (docs/AUDIT.md A16)"
+            )
         if not self.routes:
             raise ValueError("at least 1 route must be configured")
         ids = [r.id for r in self.routes]
@@ -447,6 +455,9 @@ def load_config(path: str | os.PathLike[str] | None = None) -> RelayConfig:
     if not isinstance(raw, dict):
         raise ConfigError(f"config file {config_path} must contain a YAML mapping")
 
+    max_in_flight = os.environ.get("RELAY_MAX_IN_FLIGHT")
+    if max_in_flight is not None:
+        raw = {**raw, "server": {**(raw.get("server") or {}), "max_in_flight": max_in_flight}}
     access_log = os.environ.get("RELAY_ACCESS_LOG")
     if access_log is not None:
         enabled = access_log.strip().lower() not in ("0", "false", "no")
