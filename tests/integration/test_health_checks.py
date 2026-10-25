@@ -38,8 +38,8 @@ async def test_unhealthy_upstream_excluded_then_restored(upstream_a, upstream_b)
         assert set(await instances(client, 6)) == {"backend-a"}
         summary = (await client.get("/__relay/routes")).json()["routes"][0]
         assert summary["upstreams"] == [
-            {"id": "u0", "healthy": True},
-            {"id": "u1", "healthy": False},
+            {"id": "u0", "healthy": True, "circuit": "closed"},
+            {"id": "u1", "healthy": False, "circuit": "closed"},
         ]
         assert "url" not in str(summary)  # no upstream URLs leaked
 

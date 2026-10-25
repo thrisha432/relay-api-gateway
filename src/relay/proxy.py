@@ -8,8 +8,11 @@ Pipeline order (see docs/ARCHITECTURE.md):
     cannot make the gateway buffer request bodies.
  4. Read the body, enforcing the size limit (413).
  5. Cache lookup for eligible GET requests (a hit returns immediately).
- 6. Pick a healthy upstream (round-robin over instances that pass health checks).
- 7. Forward with explicit timeouts and a response-size cap.
+ 6. Pick a healthy upstream (round-robin over instances that pass health
+    checks), skipping instances whose circuit breaker is open.
+ 7. Forward with per-attempt and whole-request deadlines and a response-size
+    cap; retry safe methods on transient failures with jittered backoff,
+    preferring an instance not yet tried.
  8. Fill the cache if the response is eligible.
  9. Return the response with hop-by-hop headers removed.
 """
@@ -26,6 +29,7 @@ from redis.asyncio import Redis
 from starlette.requests import Request
 from starlette.responses import Response
 
+from relay.cache.redis_cache import RedisResponseCache
 from relay.cache.response_cache import (
     CACHE_HEADER,
     CachedResponse,
@@ -39,6 +43,7 @@ from relay.cache.response_cache import (
 from relay.client_identity import ClientIdentityResolver
 from relay.config import RelayConfig, RouteConfig, UpstreamConfig
 from relay.errors import (
+    CIRCUIT_OPEN,
     INVALID_REQUEST,
     METHOD_NOT_ALLOWED,
     NO_HEALTHY_UPSTREAM,
@@ -64,10 +69,13 @@ from relay.headers import (
 from relay.health import HealthChecker, HealthRegistry
 from relay.load_balancer import RoundRobinBalancer
 from relay.logging_config import get_logger
-from relay.metrics import RelayMetrics, status_class
+from relay.metrics import CallbackGauge, RelayMetrics, status_class
 from relay.models import RequestContext, UpstreamResponse
 from relay.rate_limiter import RateLimitDecision, RateLimiterUnavailable, RedisRateLimiter
 from relay.redis_client import create_redis, ping
+from relay.resilience.circuit_breaker import STATE_VALUES, BreakerState, CircuitBreaker, Permit
+from relay.resilience.retry import RetryPolicy
+from relay.resilience.timeouts import Deadline
 from relay.routing import InvalidPathError, RouteMatch, Router, validate_raw_path
 
 logger = get_logger("proxy")
@@ -117,6 +125,7 @@ class ProxyRequest:
     upstream_headers: RawHeaders
     body: bytes
     peer: str | None
+    request: Request
 
 
 class Gateway:
@@ -140,9 +149,20 @@ class Gateway:
             config.routes, self.health, on_probe=self._observe_probe
         )
         self.balancers = {r.id: RoundRobinBalancer(r.upstreams) for r in config.routes}
-        self.cache: ResponseCache = cache or LocalResponseCache(
-            config.cache.max_entries, on_evict=self.metrics.cache_evictions_total.inc
-        )
+        # The Redis cache backend needs the Redis client, so it is built in start().
+        self.cache: ResponseCache | None = cache
+        if cache is None and config.cache.backend == "local":
+            self.cache = LocalResponseCache(
+                config.cache.max_entries, on_evict=self.metrics.cache_evictions_total.inc
+            )
+        self.retry_policies = {r.id: RetryPolicy(r.retries) for r in config.routes}
+        self.breakers = {
+            (r.id, u.id): CircuitBreaker(
+                r.circuit_breaker, on_transition=self._breaker_listener(r.id, u.id)
+            )
+            for r in config.routes
+            for u in r.upstreams
+        }
         self._client = http_client
         self._owns_client = http_client is None
         self.redis = redis
@@ -154,6 +174,14 @@ class Gateway:
         for route in config.routes:
             for upstream in route.upstreams:
                 self.metrics.upstream_healthy.labels(route.id, upstream.id).set(1)
+        self.metrics.register_collector(
+            CallbackGauge(
+                "relay_circuit_breaker_state",
+                "Circuit-breaker state per upstream: 0=closed, 1=half_open, 2=open.",
+                ["route", "upstream"],
+                lambda: [(key, STATE_VALUES[b.state]) for key, b in self.breakers.items()],
+            )
+        )
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -177,12 +205,20 @@ class Gateway:
             self.rate_limiter = RedisRateLimiter(
                 self.redis, operation_timeout_seconds=self.config.redis.operation_timeout_seconds
             )
+        if self.cache is None:
+            assert self.redis is not None, "config validation guarantees redis.url"
+            self.cache = RedisResponseCache(
+                self.redis,
+                operation_timeout_seconds=self.config.redis.operation_timeout_seconds,
+                on_error=lambda op: self.metrics.redis_errors_total.labels(op).inc(),
+            )
         await self.health_checker.start()
 
     async def close(self) -> None:
         """Release everything start() created. Safe to call more than once."""
         await self.health_checker.stop()
-        await self.cache.close()
+        if self.cache is not None:
+            await self.cache.close()
         if self._client is not None and self._owns_client:
             await self._client.aclose()
         self._client = None
@@ -221,7 +257,12 @@ class Gateway:
                 "path_prefix": r.path_prefix,
                 "strip_prefix": r.strip_prefix,
                 "upstreams": [
-                    {"id": u.id, "healthy": self.health.is_healthy(r.id, u.id)} for u in r.upstreams
+                    {
+                        "id": u.id,
+                        "healthy": self.health.is_healthy(r.id, u.id),
+                        "circuit": self.breakers[(r.id, u.id)].state.value,
+                    }
+                    for u in r.upstreams
                 ],
                 "rate_limited": r.rate_limit is not None,
                 "cache_enabled": r.cache.enabled,
@@ -291,6 +332,7 @@ class Gateway:
             upstream_headers=self._upstream_headers(request, client_headers, peer, ctx),
             body=body,
             peer=peer,
+            request=request,
         )
 
     # ------------------------------------------------------------ rate limit
@@ -347,6 +389,7 @@ class Gateway:
         key = cache_key(
             route.id, preq.raw_path, preq.query, preq.client_headers, route.cache.vary_headers
         )
+        assert self.cache is not None
         cached = await self.cache.get(key)
         preq.ctx.cache = "hit" if cached is not None else "miss"
         self.metrics.cache_requests_total.labels(route.id, preq.ctx.cache).inc()
@@ -363,6 +406,7 @@ class Gateway:
             body=result.body,
             stored_at=time.time(),
         )
+        assert self.cache is not None
         await self.cache.set(key, entry, ttl)
         self.metrics.cache_stores_total.labels(preq.route.id, "stored").inc()
 
@@ -379,20 +423,95 @@ class Gateway:
     # -------------------------------------------------------------- upstream
 
     async def _forward(self, preq: ProxyRequest) -> UpstreamResponse:
+        """Send the request upstream with breaker checks and bounded safe retries.
+
+        Returns the final upstream response (which may itself be a 5xx after
+        retries were exhausted; the upstream's own error body is passed through)
+        or raises GatewayError for transport failures and unavailability.
+        """
         route = preq.route
-        candidates = self.balancers[route.id].candidates(
+        policy = self.retry_policies[route.id]
+        max_attempts = policy.attempts_for(preq.method)
+        deadline = Deadline(route.timeouts.request_seconds)
+        tried: set[str] = set()
+        last_response: UpstreamResponse | None = None
+        last_error: ErrorSpec | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            selection = self._select_upstream(route, tried)
+            if isinstance(selection, ErrorSpec):
+                if attempt == 1:
+                    raise GatewayError(selection)
+                break  # nothing left to retry against; report the previous outcome
+            upstream, permit = selection
+            tried.add(upstream.id)
+            preq.ctx.upstream_id = upstream.id
+            preq.ctx.attempts = attempt
+            breaker = self.breakers[(route.id, upstream.id)]
+            budget = min(route.timeouts.attempt_seconds, deadline.remaining())
+
+            outcome_recorded = False
+            try:
+                result = await self._attempt(preq, upstream, budget)
+            except UpstreamFailure as failure:
+                if not policy.is_retryable_failure(failure.kind.value):
+                    raise GatewayError(_FAILURE_ERRORS[failure.kind]) from None
+                breaker.record_failure(permit)
+                outcome_recorded = True
+                last_response, last_error = None, _FAILURE_ERRORS[failure.kind]
+                reason = failure.kind.value
+            else:
+                if result.status in route.circuit_breaker.failure_status_codes:
+                    breaker.record_failure(permit)
+                else:
+                    breaker.record_success(permit)
+                outcome_recorded = True
+                if not policy.is_retryable_status(result.status):
+                    return result
+                last_response, last_error = result, None
+                reason = "status"
+            finally:
+                # Cancellation or a non-retryable failure: hand the permit back so
+                # a HALF_OPEN breaker never leaks probe slots.
+                if not outcome_recorded:
+                    breaker.release(permit)
+
+            if attempt == max_attempts:
+                if max_attempts > 1:
+                    self.metrics.retries_exhausted_total.labels(route.id).inc()
+                break
+            delay = policy.backoff_seconds(attempt)
+            if not deadline.can_fit(delay) or await preq.request.is_disconnected():
+                break
+            self.metrics.retries_total.labels(route.id, reason).inc()
+            await asyncio.sleep(delay)
+
+        if last_response is not None:
+            return last_response
+        assert last_error is not None
+        raise GatewayError(last_error)
+
+    def _select_upstream(
+        self, route: RouteConfig, tried: set[str]
+    ) -> tuple[UpstreamConfig, Permit] | ErrorSpec:
+        """Next healthy upstream whose breaker admits a request.
+
+        Untried instances are preferred, so a retry goes to a different
+        instance when one is available.
+        """
+        healthy = self.balancers[route.id].candidates(
             lambda u: self.health.is_healthy(route.id, u.id)
         )
-        if not candidates:
+        if not healthy:
             self.metrics.no_healthy_upstream_total.labels(route.id).inc()
-            raise GatewayError(NO_HEALTHY_UPSTREAM)
-        upstream = candidates[0]
-        preq.ctx.upstream_id = upstream.id
-        preq.ctx.attempts = 1
-        try:
-            return await self._attempt(preq, upstream, route.timeouts.attempt_seconds)
-        except UpstreamFailure as failure:
-            raise GatewayError(_FAILURE_ERRORS[failure.kind]) from None
+            return NO_HEALTHY_UPSTREAM
+        ordered = [u for u in healthy if u.id not in tried] + [u for u in healthy if u.id in tried]
+        for upstream in ordered:
+            permit = self.breakers[(route.id, upstream.id)].try_acquire()
+            if permit is not None:
+                return upstream, permit
+            self.metrics.circuit_rejections_total.labels(route.id, upstream.id).inc()
+        return CIRCUIT_OPEN
 
     async def _attempt(
         self, preq: ProxyRequest, upstream: UpstreamConfig, budget: float
@@ -519,6 +638,25 @@ class Gateway:
 
     def _observe_health_change(self, route_id: str, upstream_id: str, healthy: bool) -> None:
         self.metrics.upstream_healthy.labels(route_id, upstream_id).set(1 if healthy else 0)
+
+    def _breaker_listener(self, route_id: str, upstream_id: str):
+        def on_transition(old: BreakerState, new: BreakerState) -> None:
+            self.metrics.circuit_transitions_total.labels(
+                route_id, upstream_id, old.value, new.value
+            ).inc()
+            logger.warning(
+                "circuit_breaker_transition",
+                extra={
+                    "fields": {
+                        "route_id": route_id,
+                        "upstream_id": upstream_id,
+                        "from_state": old.value,
+                        "to_state": new.value,
+                    }
+                },
+            )
+
+        return on_transition
 
 
 def build_client_response(upstream: UpstreamResponse, method: str) -> Response:
