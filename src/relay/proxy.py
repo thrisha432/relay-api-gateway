@@ -164,6 +164,10 @@ class Gateway:
                 config.cache.max_entries, on_evict=self.metrics.cache_evictions_total.inc
             )
         self._singleflight: SingleFlight[str, UpstreamResponse] = SingleFlight()
+        # Requests currently in flight to each upstream (least_request + metrics).
+        self._outstanding: dict[tuple[str, str], int] = {
+            (r.id, u.id): 0 for r in config.routes for u in r.upstreams
+        }
         self.retry_policies = {r.id: RetryPolicy(r.retries) for r in config.routes}
         self.retry_budgets = {
             r.id: RetryBudget(
@@ -204,6 +208,14 @@ class Gateway:
                     if self._client is not None
                     else []
                 ),
+            )
+        )
+        self.metrics.register_collector(
+            CallbackGauge(
+                "relay_upstream_in_flight",
+                "Requests currently in flight to each upstream instance.",
+                ["route", "upstream"],
+                lambda: [(key, float(n)) for key, n in self._outstanding.items()],
             )
         )
         self.metrics.register_collector(
@@ -576,6 +588,9 @@ class Gateway:
         if not healthy:
             self.metrics.no_healthy_upstream_total.labels(route.id).inc()
             return NO_HEALTHY_UPSTREAM
+        if route.load_balancing == "least_request":
+            # Stable sort keeps the round-robin rotation as the tie-breaker.
+            healthy = sorted(healthy, key=lambda u: self._outstanding[(route.id, u.id)])
         ordered = [u for u in healthy if u.id not in tried] + [u for u in healthy if u.id in tried]
         for upstream in ordered:
             permit = self.breakers[(route.id, upstream.id)].try_acquire()
@@ -590,6 +605,8 @@ class Gateway:
         """One upstream attempt, instrumented with latency and outcome metrics."""
         start = time.perf_counter()
         outcome = "unknown"
+        key = (preq.route.id, upstream.id)
+        self._outstanding[key] += 1
         try:
             result = await self._send_once(preq, upstream, budget)
             outcome = status_class(result.status)
@@ -601,6 +618,7 @@ class Gateway:
             outcome = "cancelled"
             raise
         finally:
+            self._outstanding[key] -= 1
             route_id = preq.route.id
             self.metrics.upstream_duration.labels(route_id, upstream.id).observe(
                 time.perf_counter() - start

@@ -313,6 +313,11 @@ class RouteConfig(_Strict):
     path_prefix: str
     # False: forward the full original path. True: remove path_prefix first.
     strip_prefix: bool = False
+    # round_robin: rotate over healthy instances (spec default).
+    # least_request: fewest in-flight requests first (round-robin breaks ties),
+    # so a slow or hung instance stops receiving traffic after a few requests
+    # instead of holding the gateway's concurrency slots (see ARCHITECTURE.md).
+    load_balancing: Literal["round_robin", "least_request"] = "round_robin"
     upstreams: tuple[UpstreamConfig, ...] = Field(min_length=1, max_length=64)
     rate_limit: RateLimitConfig | None = None
     cache: RouteCacheConfig = RouteCacheConfig()

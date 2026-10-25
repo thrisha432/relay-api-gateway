@@ -91,8 +91,16 @@ def series_plot(ax, rows, x: str, y: str, modes, *, label_last: bool = True) -> 
             )
 
 
+def legend_below(fig, ax, ncols: int = 4) -> None:
+    """One legend under the plots, so it never covers data."""
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncols=ncols, fontsize=8, frameon=False)
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
+
+
 def save(fig, out: Path, name: str) -> None:
-    fig.tight_layout()
+    if not fig.legends:
+        fig.tight_layout()
     fig.savefig(out / name, dpi=160)
     plt.close(fig)
 
@@ -113,47 +121,80 @@ def chart_concurrency(rows, out: Path) -> None:
         ylabel="p99 latency (ms, log)",
         yscale="log",
     )
-    a.legend(loc="upper left", fontsize=8)
+    legend_below(fig, a)
     save(fig, out, "concurrency.png")
 
 
-def chart_latency(rows, out: Path) -> None:
+def paired_ratio(
+    runs: list[dict], experiment: str, mode: str, key: str
+) -> dict[float, list[float]]:
+    """mode rps / direct rps, computed within each repetition.
+
+    Pairing cancels environment drift between repetitions (the whole machine
+    slowed ~35% partway through the v1 matrix; direct and NGINX included).
+    """
+    base = {
+        (r[key], r["rep"]): float(r["rps"])
+        for r in runs
+        if r["experiment"] == experiment and r["mode"] == "direct"
+    }
+    out: dict[float, list[float]] = defaultdict(list)
+    for r in runs:
+        if r["experiment"] == experiment and r["mode"] == mode and (r[key], r["rep"]) in base:
+            out[float(r[key])].append(100 * float(r["rps"]) / base[(r[key], r["rep"])])
+    return out
+
+
+def load_runs(matrix: Path) -> list[dict]:
+    with (matrix / "runs.csv").open() as fh:
+        return list(csv.DictReader(fh))
+
+
+def chart_latency(rows, out: Path, runs: list[dict]) -> None:
     data = [r for r in rows if r["experiment"] == "latency"]
-    direct = {r["delay_ms"]: r for r in data if r["mode"] == "direct"}
     fig, (a, b) = plt.subplots(1, 2, figsize=(10, 3.8))
-    series_plot(a, data, "delay_ms", "rps", ("direct", "nginx", "relay-uncached"))
+    series_plot(a, data, "delay_ms", "rps", ("direct", "nginx", "relay-uncached"), label_last=False)
     a.set(
         title="Throughput vs upstream latency (50 VUs)",
         xlabel="upstream processing time (ms)",
-        ylabel="requests / s",
+        ylabel="requests / s (log)",
+        yscale="log",
     )
-    a.legend(fontsize=8)
     for mode in ("nginx", "relay-uncached"):
-        pts = sorted((r for r in data if r["mode"] == mode), key=lambda r: r["delay_ms"])
-        xs = [p["delay_ms"] for p in pts]
-        overhead = [
-            100
-            * (p["p50_ms_median"] - direct[p["delay_ms"]]["p50_ms_median"])
-            / direct[p["delay_ms"]]["p50_ms_median"]
-            for p in pts
-        ]
+        ratios = paired_ratio(runs, "latency", mode, "delay_ms")
+        xs = sorted(ratios)
+        med = [sorted(ratios[x])[len(ratios[x]) // 2] for x in xs]
         color, marker, label = SERIES[mode]
-        b.plot(xs, overhead, color=color, marker=marker, label=label)
-        b.annotate(
-            f"{overhead[-1]:.0f}%",
-            (xs[-1], overhead[-1]),
-            textcoords="offset points",
-            xytext=(6, 0),
-            va="center",
-            color=INK2,
-            fontsize=8,
+        b.errorbar(
+            xs,
+            med,
+            yerr=[
+                [m - min(ratios[x]) for m, x in zip(med, xs, strict=True)],
+                [max(ratios[x]) - m for m, x in zip(med, xs, strict=True)],
+            ],
+            color=color,
+            marker=marker,
+            label=label,
+            capsize=2,
+            elinewidth=1,
         )
+        for x, m in zip(xs, med, strict=True):
+            b.annotate(
+                f"{m:.0f}%",
+                (x, m),
+                textcoords="offset points",
+                xytext=(0, 8) if mode == "nginx" else (8, -2),
+                ha="center" if mode == "nginx" else "left",
+                color=INK2,
+                fontsize=8,
+            )
     b.set(
-        title="Added p50 latency vs direct (% of direct p50)",
+        title="Throughput as % of direct (paired per repetition)",
         xlabel="upstream processing time (ms)",
-        ylabel="overhead (%)",
+        ylabel="% of direct throughput",
+        ylim=(0, 110),
     )
-    b.legend(fontsize=8)
+    legend_below(fig, a, ncols=3)
     save(fig, out, "upstream_latency.png")
 
 
@@ -204,44 +245,47 @@ def chart_openloop(rows, out: Path) -> None:
     save(fig, out, "open_loop.png")
 
 
-def chart_scaling(rows, out: Path) -> None:
-    data = sorted((r for r in rows if r["experiment"] == "scaling"), key=lambda r: r["instances"])
-    if not data:
+def chart_scaling(runs: list[dict], out: Path) -> None:
+    """Speedup vs 1 instance, paired within each repetition (cancels drift)."""
+    base = {
+        r["rep"]: float(r["rps"])
+        for r in runs
+        if r["experiment"] == "scaling" and r["instances"] == "1"
+    }
+    by_n: dict[int, list[float]] = defaultdict(list)
+    for r in runs:
+        if r["experiment"] == "scaling" and r["rep"] in base:
+            by_n[int(r["instances"])].append(float(r["rps"]) / base[r["rep"]])
+    if not by_n:
         return
+    xs = sorted(by_n)
+    med = [sorted(by_n[x])[len(by_n[x]) // 2] for x in xs]
     fig, ax = plt.subplots(figsize=(5, 3.6))
-    xs = [r["instances"] for r in data]
-    ys = [r["rps_median"] for r in data]
+    ax.plot(xs, xs, color=INK2, linestyle=":", linewidth=1, label="perfectly linear")
     ax.errorbar(
         xs,
-        ys,
+        med,
         yerr=[
-            [r["rps_median"] - r["rps_min"] for r in data],
-            [r["rps_max"] - r["rps_median"] for r in data],
+            [m - min(by_n[x]) for m, x in zip(med, xs, strict=True)],
+            [max(by_n[x]) - m for m, x in zip(med, xs, strict=True)],
         ],
         color=SERIES["relay-uncached"][0],
         marker="^",
         capsize=2,
-        label="measured",
+        label="measured (median of reps)",
     )
-    ax.plot(
-        xs,
-        [ys[0] * x for x in xs],
-        color=INK2,
-        linestyle=":",
-        linewidth=1,
-        label="linear from 1 instance",
-    )
-    for x, y in zip(xs, ys, strict=True):
+    for x, m in zip(xs, med, strict=True):
         ax.annotate(
-            f"{y:,.0f}", (x, y), textcoords="offset points", xytext=(6, -10), color=INK2, fontsize=8
+            f"{m:.2f}x", (x, m), textcoords="offset points", xytext=(8, -4), color=INK2, fontsize=8
         )
     ax.set(
-        title="Horizontal scaling (100 VUs, uncached)",
+        title="Horizontal scaling (60 VUs, uncached)",
         xlabel="Relay instances",
-        ylabel="requests / s",
+        ylabel="speedup vs 1 instance",
         xticks=xs,
+        yticks=xs,
     )
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=8, loc="upper left")
     save(fig, out, "scaling.png")
 
 
@@ -252,6 +296,7 @@ def bar_chart(
     if not data:
         return
     fig, ax = plt.subplots(figsize=(7, 3.4))
+    ax.grid(axis="x", visible=False)  # vertical grid lines would cut through the bars
     labels = [r["mode"].removeprefix("relay-") for r in data]
     values = [r[f"{metric}_median"] for r in data]
     bars = ax.bar(
@@ -468,9 +513,9 @@ def main() -> None:
     out.mkdir(exist_ok=True)
     rows = load_summary(matrix)
     chart_concurrency(rows, out)
-    chart_latency(rows, out)
+    chart_latency(rows, out, load_runs(matrix))
     chart_openloop(rows, out)
-    chart_scaling(rows, out)
+    chart_scaling(load_runs(matrix), out)
     bar_chart(
         rows,
         out,

@@ -124,6 +124,14 @@ def scenarios() -> list[Scenario]:
             lambda: mock(8002, "/__mock/reset"),
         ),
         Scenario(
+            "backend-hang-lr",
+            "/api/bench-ha-lr",
+            "bench-ha-lr",
+            "same hang as backend-hang, but the route uses least-request balancing",
+            lambda: mock(8002, "/__mock/config", {"delay_ms": 10000}),
+            lambda: mock(8002, "/__mock/reset"),
+        ),
+        Scenario(
             "backend-503",
             "/api/bench-ha",
             "bench-ha",
@@ -158,18 +166,34 @@ def scenarios() -> list[Scenario]:
     ]
 
 
-class RouteStatePoller(threading.Thread):
-    """Records breaker state and health of each upstream once per second."""
+def vm_clock_offset() -> float:
+    """Docker VM clock minus host clock, in seconds.
 
-    def __init__(self, route_id: str) -> None:
+    k6 timestamps come from the VM; fault injection and state polling use host
+    time. After the host sleeps, the VM clock can be off by seconds or more,
+    so every run measures the offset and converts between the two.
+    """
+    before = time.time()
+    vm = float(
+        compose("exec", "-T", "relay", "python", "-c", "import time; print(time.time())").strip()
+    )
+    after = time.time()
+    return vm - (before + after) / 2
+
+
+class RouteStatePoller(threading.Thread):
+    """Records breaker state and health of each upstream once per second (VM-clock keyed)."""
+
+    def __init__(self, route_id: str, vm_offset: float = 0.0) -> None:
         super().__init__(daemon=True)
         self.route_id = route_id
+        self.vm_offset = vm_offset
         self.rows: dict[int, dict[str, str]] = {}
         self._stop = threading.Event()
 
     def run(self) -> None:
         while not self._stop.is_set():
-            sec = int(time.time())
+            sec = int(time.time() + self.vm_offset)
             try:
                 routes = http_json(f"{GATEWAY}/__relay/routes")["routes"]
                 route = next(r for r in routes if r["id"] == self.route_id)
@@ -208,12 +232,13 @@ def percentile_from_buckets(counts: list[int], q: float) -> float:
     return float(BUCKETS[-1])
 
 
-def run(scenario: Scenario, rep: int, out: Path) -> dict:
+def run(scenario: Scenario, rep: int, out: Path, attempt: int = 1) -> dict:
     for port in (8001, 8002):
         mock(port, "/__mock/reset")
     time.sleep(3)  # let health checks and breakers settle
+    vm_offset = vm_clock_offset()
     before = counter_totals(metrics_text(), scenario.route_id)
-    poller = RouteStatePoller(scenario.route_id)
+    poller = RouteStatePoller(scenario.route_id, vm_offset)
     poller.start()
 
     raw_name = f"{scenario.name}-rep{rep}.k6.json"
@@ -256,17 +281,36 @@ def run(scenario: Scenario, rep: int, out: Path) -> dict:
             break
         time.sleep(0.1)
     if start is None:
-        start = int(time.time())
+        start = int(time.time() + vm_offset)
+    start_host = start - vm_offset  # the same instant on the host clock
     events = {}
-    time.sleep(max(0, start + FAULT_AT - time.time()))
-    events["fault"] = time.time() - start
+    time.sleep(max(0, start_host + FAULT_AT - time.time()))
+    events["fault"] = time.time() - start_host
     scenario.fault()
-    time.sleep(max(0, start + RECOVER_AT - time.time()))
-    events["recover"] = time.time() - start
+    time.sleep(max(0, start_host + RECOVER_AT - time.time()))
+    events["recover"] = time.time() - start_host
     scenario.recover()
     proc.wait()
     reader.join(timeout=5)
     poller.stop()
+    k6_summary = out / raw_name
+    ran_s = (
+        json.loads(k6_summary.read_text())["state"]["testRunDurationMs"] / 1000
+        if k6_summary.exists()
+        else 0
+    )
+    if not k6_summary.exists() or ran_s > DURATION * 1.5:
+        # Paused (host sleep froze the Docker VM) or failed: never keep it.
+        if k6_summary.exists():
+            k6_summary.rename(out / f"{raw_name}.invalid-{int(ran_s)}s")
+        print(
+            f"  WARNING: {scenario.name} rep{rep} ran {ran_s:.0f}s for a {DURATION}s test; discarded, re-running",
+            flush=True,
+        )
+        if attempt >= 3:
+            raise SystemExit(f"{scenario.name}: 3 invalid runs in a row; is the machine sleeping?")
+        scenario.recover()
+        return run(scenario, rep, out, attempt + 1)
     after = counter_totals(metrics_text(), scenario.route_id)
 
     # Merge per-VU per-second records.
@@ -319,6 +363,7 @@ def run(scenario: Scenario, rep: int, out: Path) -> dict:
         "description": scenario.description,
         "rep": rep,
         "events_s": events,
+        "vm_clock_offset_s": round(vm_offset, 3),
         "baseline_p99_ms": statistics.median([r["p99_ms"] for r in baseline_rows])
         if baseline_rows
         else None,

@@ -131,6 +131,17 @@ routes:
       ttl_seconds: 30
       coalesce: false
 
+  # Same as bench-ha with least-request balancing: compared with round-robin
+  # in the backend-hang chaos scenario.
+  - id: "bench-ha-lr"
+    path_prefix: "/api/bench-ha-lr"
+    load_balancing: "least_request"
+    upstreams:
+      - id: "bench-ha-lr-a"
+        url: "http://backend-a:8001"
+      - id: "bench-ha-lr-b"
+        url: "http://backend-b:8002"
+
   # Brownout benchmark: retries enabled with (budget) and without (nobudget)
   # a retry budget. The breaker threshold is high so only the budget limits
   # retry amplification.
