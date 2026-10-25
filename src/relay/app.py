@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from prometheus_client import CONTENT_TYPE_LATEST
+from redis.asyncio import Redis
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
@@ -35,15 +36,16 @@ def create_app(
     *,
     http_client: httpx.AsyncClient | None = None,
     cache: ResponseCache | None = None,
+    redis: Redis | None = None,
 ) -> FastAPI:
     """Build the Relay ASGI app.
 
-    ``http_client`` and ``cache`` let tests inject dependencies; normally the
-    gateway creates and owns them for the app's lifetime.
+    ``http_client``, ``cache`` and ``redis`` let tests inject dependencies;
+    normally the gateway creates and owns them for the app's lifetime.
     """
     config = config or load_config()
     metrics = RelayMetrics()
-    gateway = Gateway(config, metrics=metrics, http_client=http_client, cache=cache)
+    gateway = Gateway(config, metrics=metrics, http_client=http_client, cache=cache, redis=redis)
 
     def observe(ctx: RequestContext, method: str, status: int, duration: float) -> None:
         metrics.requests_total.labels(
@@ -88,10 +90,9 @@ def create_app(
 
     @app.get("/health/ready")
     async def ready(request: Request) -> Response:
-        """Readiness policy: the first health-check round has finished and every
-        route has at least one healthy upstream."""
+        """See Gateway.readiness for the readiness policy."""
         _ops(request)
-        report = gateway.readiness()
+        report = await gateway.readiness()
         return JSONResponse(report, status_code=200 if report["status"] == "ready" else 503)
 
     @app.get("/metrics")

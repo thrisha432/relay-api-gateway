@@ -1,13 +1,17 @@
 """The gateway request pipeline.
 
 Pipeline order (see docs/ARCHITECTURE.md):
- 1. Validate path/method and enforce the request body limit.
+ 1. Validate path/method.
  2. Match a configured route (404 otherwise).
- 3. Cache lookup for eligible GET requests (a hit returns immediately).
- 4. Pick a healthy upstream (round-robin over instances that pass health checks).
- 5. Forward with explicit timeouts and a response-size cap.
- 6. Fill the cache if the response is eligible.
- 7. Return the response with hop-by-hop headers removed.
+ 3. Rate limit by client identity (429, or 503 if Redis is down and the
+    policy is fail-closed). Done before reading the body so limited clients
+    cannot make the gateway buffer request bodies.
+ 4. Read the body, enforcing the size limit (413).
+ 5. Cache lookup for eligible GET requests (a hit returns immediately).
+ 6. Pick a healthy upstream (round-robin over instances that pass health checks).
+ 7. Forward with explicit timeouts and a response-size cap.
+ 8. Fill the cache if the response is eligible.
+ 9. Return the response with hop-by-hop headers removed.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 import httpx
+from redis.asyncio import Redis
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -38,6 +43,8 @@ from relay.errors import (
     METHOD_NOT_ALLOWED,
     NO_HEALTHY_UPSTREAM,
     PAYLOAD_TOO_LARGE,
+    RATE_LIMITED,
+    RATE_LIMITER_UNAVAILABLE,
     ROUTE_NOT_FOUND,
     UPSTREAM_BAD_RESPONSE,
     UPSTREAM_CONNECTION_ERROR,
@@ -59,9 +66,15 @@ from relay.load_balancer import RoundRobinBalancer
 from relay.logging_config import get_logger
 from relay.metrics import RelayMetrics, status_class
 from relay.models import RequestContext, UpstreamResponse
-from relay.routing import InvalidPathError, Router, validate_raw_path
+from relay.rate_limiter import RateLimitDecision, RateLimiterUnavailable, RedisRateLimiter
+from relay.redis_client import create_redis, ping
+from relay.routing import InvalidPathError, RouteMatch, Router, validate_raw_path
 
 logger = get_logger("proxy")
+
+# Fail-open warnings are logged at most this often to avoid log floods during
+# a Redis outage (the metric still counts every occurrence).
+_FAIL_OPEN_LOG_INTERVAL = 10.0
 
 # TRACE and CONNECT are never proxied (cross-site tracing / tunnelling).
 PROXY_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
@@ -116,6 +129,7 @@ class Gateway:
         metrics: RelayMetrics | None = None,
         http_client: httpx.AsyncClient | None = None,
         cache: ResponseCache | None = None,
+        redis: Redis | None = None,
     ) -> None:
         self.config = config
         self.metrics = metrics or RelayMetrics()
@@ -131,6 +145,10 @@ class Gateway:
         )
         self._client = http_client
         self._owns_client = http_client is None
+        self.redis = redis
+        self._owns_redis = redis is None
+        self.rate_limiter: RedisRateLimiter | None = None
+        self._last_fail_open_log = float("-inf")
 
         self.health.add_listener(self._observe_health_change)
         for route in config.routes:
@@ -153,27 +171,46 @@ class Gateway:
                 follow_redirects=False,
                 trust_env=False,
             )
+        if self.redis is None and self.config.redis_required:
+            self.redis = create_redis(self.config.redis)
+        if self.redis is not None and any(r.rate_limit for r in self.config.routes):
+            self.rate_limiter = RedisRateLimiter(
+                self.redis, operation_timeout_seconds=self.config.redis.operation_timeout_seconds
+            )
         await self.health_checker.start()
 
     async def close(self) -> None:
+        """Release everything start() created. Safe to call more than once."""
         await self.health_checker.stop()
         await self.cache.close()
         if self._client is not None and self._owns_client:
             await self._client.aclose()
         self._client = None
+        if self.redis is not None and self._owns_redis:
+            await self.redis.aclose()
+            self.redis = None
 
     # ------------------------------------------------------------- operations
 
-    def readiness(self) -> dict[str, object]:
-        checks: dict[str, object] = {
-            "health_checks_started": self.health_checker.first_round_complete()
-        }
+    async def readiness(self) -> dict[str, object]:
+        """Ready when health checks have run once, every route has a healthy
+        upstream, and Redis answers PING (only if the config needs Redis)."""
+        started = self.health_checker.first_round_complete()
         routes_ok = {
             r.id: any(self.health.is_healthy(r.id, u.id) for u in r.upstreams)
             for r in self.config.routes
         }
-        checks["routes_with_healthy_upstream"] = routes_ok
-        ready = bool(checks["health_checks_started"]) and all(routes_ok.values())
+        checks: dict[str, object] = {
+            "health_checks_started": started,
+            "routes_with_healthy_upstream": routes_ok,
+        }
+        ready = started and all(routes_ok.values())
+        if self.redis is not None:
+            redis_ok = await ping(self.redis, self.config.redis.operation_timeout_seconds)
+            if not redis_ok:
+                self.metrics.redis_errors_total.labels("ping").inc()
+            checks["redis"] = redis_ok
+            ready = ready and redis_ok
         return {"status": "ready" if ready else "not_ready", "checks": checks}
 
     def route_summary(self) -> list[dict[str, object]]:
@@ -204,7 +241,11 @@ class Gateway:
             return error_response(exc.spec, ctx.request_id, exc.headers)
 
     async def _handle(self, request: Request, ctx: RequestContext) -> Response:
-        preq = await self._prepare(request, ctx)
+        match = self._match(request, ctx)
+        decision = None
+        if match.route.rate_limit is not None:
+            decision = await self._enforce_rate_limit(request, match.route, ctx)
+        preq = await self._prepare(request, ctx, match)
 
         key: str | None = None
         if preq.route.cache.enabled:
@@ -218,17 +259,24 @@ class Gateway:
             if key is not None:
                 await self._cache_fill(preq, key, result)
             response.raw_headers.append((CACHE_HEADER, ctx.cache.upper().encode()))
+        if decision is not None:
+            response.raw_headers.extend(_rate_limit_headers(decision))
         return response
 
-    async def _prepare(self, request: Request, ctx: RequestContext) -> ProxyRequest:
-        method = request.method.upper()
+    def _match(self, request: Request, ctx: RequestContext) -> RouteMatch:
         raw_path = self._raw_path(request)
-        if method not in PROXY_METHODS:
+        if request.method.upper() not in PROXY_METHODS:
             raise GatewayError(METHOD_NOT_ALLOWED)
         match = self.router.match(raw_path)
         if match is None:
             raise GatewayError(ROUTE_NOT_FOUND)
         ctx.route_id = match.route.id
+        return match
+
+    async def _prepare(
+        self, request: Request, ctx: RequestContext, match: RouteMatch
+    ) -> ProxyRequest:
+        method = request.method.upper()
         body = await self._read_body(request)
         client_headers = list(request.headers.raw)
         peer = request.client.host if request.client else None
@@ -236,7 +284,7 @@ class Gateway:
             ctx=ctx,
             route=match.route,
             method=method,
-            raw_path=raw_path,
+            raw_path=self._raw_path(request),
             upstream_path=match.upstream_path,
             query=request.scope.get("query_string", b"").decode("latin-1"),
             client_headers=client_headers,
@@ -244,6 +292,48 @@ class Gateway:
             body=body,
             peer=peer,
         )
+
+    # ------------------------------------------------------------ rate limit
+
+    async def _enforce_rate_limit(
+        self, request: Request, route: RouteConfig, ctx: RequestContext
+    ) -> RateLimitDecision | None:
+        assert route.rate_limit is not None
+        if self.rate_limiter is None:
+            raise RuntimeError("rate limiter not started")
+        peer = request.client.host if request.client else None
+        forwarded = request.headers.getlist("x-forwarded-for")
+        client_id = self.identity.resolve(peer, forwarded)
+        try:
+            decision = await self.rate_limiter.acquire(route.id, client_id, route.rate_limit)
+        except RateLimiterUnavailable as exc:
+            self.metrics.redis_errors_total.labels("rate_limit").inc()
+            if self.config.redis.fail_open_for_rate_limit:
+                self._record_rate_limit(ctx, route, "fail_open")
+                self._log_fail_open(route, str(exc))
+                return None
+            self._record_rate_limit(ctx, route, "fail_closed")
+            raise GatewayError(RATE_LIMITER_UNAVAILABLE) from None
+        if not decision.allowed:
+            self._record_rate_limit(ctx, route, "limited")
+            headers = {"retry-after": str(decision.retry_after_seconds)}
+            headers.update({k.decode(): v.decode() for k, v in _rate_limit_headers(decision)})
+            raise GatewayError(RATE_LIMITED, headers=headers)
+        self._record_rate_limit(ctx, route, "allowed")
+        return decision
+
+    def _record_rate_limit(self, ctx: RequestContext, route: RouteConfig, decision: str) -> None:
+        ctx.rate_limit = decision
+        self.metrics.rate_limit_decisions_total.labels(route.id, decision).inc()
+
+    def _log_fail_open(self, route: RouteConfig, error: str) -> None:
+        now = time.monotonic()
+        if now - self._last_fail_open_log >= _FAIL_OPEN_LOG_INTERVAL:
+            self._last_fail_open_log = now
+            logger.warning(
+                "rate_limit_fail_open",
+                extra={"fields": {"route_id": route.id, "error_type": error}},
+            )
 
     # ------------------------------------------------------------------ cache
 
@@ -444,3 +534,10 @@ def build_client_response(upstream: UpstreamResponse, method: str) -> Response:
         response.raw_headers = [(b"content-length", declared)] if declared else []
     response.raw_headers.extend(filter_response_headers(upstream.headers))
     return response
+
+
+def _rate_limit_headers(decision: RateLimitDecision) -> list[tuple[bytes, bytes]]:
+    return [
+        (b"x-ratelimit-limit", str(decision.limit).encode()),
+        (b"x-ratelimit-remaining", str(decision.remaining).encode()),
+    ]
