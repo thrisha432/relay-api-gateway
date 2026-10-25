@@ -11,6 +11,7 @@ import httpx
 from helpers import build_config
 from relay.__main__ import main
 from relay.app import create_app
+from relay.config import load_config
 from relay.logging_config import JsonFormatter, TextFormatter, configure_logging
 from relay.metrics import method_label, status_class
 
@@ -71,8 +72,10 @@ def test_metric_label_normalisation_is_bounded() -> None:
 
 
 def test_cli_check_validates_config(capsys, tmp_path) -> None:
-    assert main(["--config", str(ROOT / "config" / "routes.yaml"), "--check"]) == 0
-    assert "config OK: 9 route(s)" in capsys.readouterr().out
+    config_path = ROOT / "config" / "routes.yaml"
+    assert main(["--config", str(config_path), "--check"]) == 0
+    expected = len(load_config(config_path).routes)
+    assert f"config OK: {expected} route(s)" in capsys.readouterr().out
     bad = tmp_path / "bad.yaml"
     bad.write_text("routes: []\n")
     assert main(["--config", str(bad), "--check"]) == 2
