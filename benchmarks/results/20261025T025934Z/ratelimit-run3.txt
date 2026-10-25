@@ -1,0 +1,8 @@
+ Container relay-k6-run-fb29e97d5ef8 Creating 
+ Container relay-k6-run-fb29e97d5ef8 Created 
+scenario: ratelimit-two-gateways
+requests: 249168  rps: 8305.1
+latency: p50 0.55ms  p95 0.87ms  p99 1.18ms  max 7.56ms
+http_req_failed rate: 0.000%
+allowed (200): 34  limited (429): 249134
+theoretical ceiling (capacity 5 + 1/s x 30s): 35  -> WITHIN

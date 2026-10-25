@@ -1,0 +1,6 @@
+ Container relay-k6-run-4596b58d48d0 Creating 
+ Container relay-k6-run-4596b58d48d0 Created 
+scenario: gateway-uncached
+requests: 136541  rps: 1137.6
+latency: p50 32.56ms  p95 117.27ms  p99 177.15ms  max 430.02ms
+http_req_failed rate: 0.000%

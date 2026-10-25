@@ -1,0 +1,8 @@
+ Container relay-k6-run-05f10f00e9e2 Creating 
+ Container relay-k6-run-05f10f00e9e2 Created 
+scenario: ratelimit-two-gateways
+requests: 247271  rps: 8242.1
+latency: p50 0.55ms  p95 0.88ms  p99 1.20ms  max 10.70ms
+http_req_failed rate: 0.000%
+allowed (200): 34  limited (429): 247237
+theoretical ceiling (capacity 5 + 1/s x 30s): 35  -> WITHIN

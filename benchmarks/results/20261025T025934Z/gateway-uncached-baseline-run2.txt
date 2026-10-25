@@ -1,0 +1,6 @@
+ Container relay-k6-run-bee138d367c0 Creating 
+ Container relay-k6-run-bee138d367c0 Created 
+scenario: gateway-uncached
+requests: 84695  rps: 1411.4
+latency: p50 5.35ms  p95 14.22ms  p99 41.22ms  max 312.78ms
+http_req_failed rate: 0.000%

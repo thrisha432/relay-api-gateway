@@ -1,0 +1,6 @@
+ Container relay-k6-run-ef8e2598acef Creating 
+ Container relay-k6-run-ef8e2598acef Created 
+scenario: direct
+requests: 1162838  rps: 19380.2
+latency: p50 0.43ms  p95 0.87ms  p99 1.03ms  max 7.23ms
+http_req_failed rate: 0.000%

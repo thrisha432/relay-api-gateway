@@ -1,0 +1,6 @@
+ Container relay-k6-run-ef994f2c90b5 Creating 
+ Container relay-k6-run-ef994f2c90b5 Created 
+scenario: gateway-uncached
+requests: 84124  rps: 1401.9
+latency: p50 5.38ms  p95 14.50ms  p99 40.28ms  max 350.59ms
+http_req_failed rate: 0.000%

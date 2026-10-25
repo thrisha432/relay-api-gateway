@@ -1,0 +1,6 @@
+ Container relay-k6-run-7ca8d839bcac Creating 
+ Container relay-k6-run-7ca8d839bcac Created 
+scenario: direct
+requests: 2444570  rps: 20370.7
+latency: p50 2.33ms  p95 2.90ms  p99 4.73ms  max 22.10ms
+http_req_failed rate: 0.000%

@@ -1,0 +1,7 @@
+ Container relay-k6-run-849735b6f617 Creating 
+ Container relay-k6-run-849735b6f617 Created 
+scenario: gateway-cached
+requests: 420599  rps: 7009.8
+latency: p50 1.22ms  p95 2.49ms  p99 2.76ms  max 37.69ms
+http_req_failed rate: 0.000%
+cache hit ratio: 99.87% (420050 hits / 549 misses)

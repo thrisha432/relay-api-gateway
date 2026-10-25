@@ -1,0 +1,8 @@
+ Container relay-k6-run-3cb35d3f73d6 Creating 
+ Container relay-k6-run-3cb35d3f73d6 Created 
+time="2026-10-25T03:22:15Z" level=info msg="GATEWAY_COUNTERS {\"relay_retries_total\":6,\"relay_retries_exhausted_total\":0,\"relay_circuit_breaker_transitions_total\":3,\"relay_circuit_breaker_rejections_total\":2590,\"relay_no_healthy_upstream_total\":0}" source=console
+scenario: failure
+requests: 104675  rps: 1308.1
+latency: p50 5.92ms  p95 13.72ms  p99 30.30ms  max 953.73ms
+http_req_failed rate: 0.000%
+failure window: backend-b unhealthy + 503 from t=20s to t=50s

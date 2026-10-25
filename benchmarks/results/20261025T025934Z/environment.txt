@@ -1,0 +1,11 @@
+timestamp_utc: 20261025T025934Z
+git_commit: cfc5035
+machine: Apple M4 Pro, 12 cores, 24 GiB RAM
+os: macOS 15.7.7 (Darwin 24.6.0)
+docker: 29.4.0, VM: 12 CPUs, 8321429504 bytes
+relay_image_python: Python 3.12.15
+relay_image_packages: fastapi==0.162.0 httptools==0.9.0 httpx==0.28.1 redis==7.4.1 starlette==1.10.0 uvicorn==0.54.0 uvloop==0.23.0 
+k6: k6 v1.1.0 (commit/0e3fb953be-dirty, go1.24.4, linux/arm64)
+topology: k6, relay, backend-a/b, redis all in Docker on one bridge network; single uvicorn worker per service
+workload: closed-loop GET (no think time); responses ~0.5 KB JSON from the mock backend
+runs_per_scenario: 3; profiles: baseline load

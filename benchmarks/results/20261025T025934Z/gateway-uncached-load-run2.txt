@@ -1,0 +1,6 @@
+ Container relay-k6-run-0fcdb7c5ee2d Creating 
+ Container relay-k6-run-0fcdb7c5ee2d Created 
+scenario: gateway-uncached
+requests: 139418  rps: 1161.5
+latency: p50 31.89ms  p95 114.53ms  p99 174.67ms  max 524.18ms
+http_req_failed rate: 0.000%

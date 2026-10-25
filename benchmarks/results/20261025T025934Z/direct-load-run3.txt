@@ -1,0 +1,6 @@
+ Container relay-k6-run-fb942a4bb0fb Creating 
+ Container relay-k6-run-fb942a4bb0fb Created 
+scenario: direct
+requests: 2445853  rps: 20381.6
+latency: p50 2.32ms  p95 2.91ms  p99 4.72ms  max 57.26ms
+http_req_failed rate: 0.000%

@@ -1,0 +1,7 @@
+ Container relay-k6-run-3f217e2dec50 Creating 
+ Container relay-k6-run-3f217e2dec50 Created 
+scenario: gateway-cached
+requests: 840320  rps: 7002.2
+latency: p50 6.76ms  p95 7.73ms  p99 13.68ms  max 545.69ms
+http_req_failed rate: 0.000%
+cache hit ratio: 99.73% (838027 hits / 2293 misses)

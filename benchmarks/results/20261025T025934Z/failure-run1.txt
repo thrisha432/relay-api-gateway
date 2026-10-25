@@ -1,0 +1,8 @@
+ Container relay-k6-run-0672dd119c2f Creating 
+ Container relay-k6-run-0672dd119c2f Created 
+time="2026-10-25T03:10:40Z" level=info msg="GATEWAY_COUNTERS {\"relay_retries_total\":7,\"relay_retries_exhausted_total\":0,\"relay_circuit_breaker_transitions_total\":3,\"relay_circuit_breaker_rejections_total\":2632,\"relay_no_healthy_upstream_total\":0}" source=console
+scenario: failure
+requests: 106766  rps: 1334.3
+latency: p50 5.79ms  p95 13.80ms  p99 27.83ms  max 1402.43ms
+http_req_failed rate: 0.000%
+failure window: backend-b unhealthy + 503 from t=20s to t=50s

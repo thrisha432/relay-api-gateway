@@ -1,0 +1,6 @@
+ Container relay-k6-run-95a4087c6531 Creating 
+ Container relay-k6-run-95a4087c6531 Created 
+scenario: gateway-uncached
+requests: 81194  rps: 1353.1
+latency: p50 5.59ms  p95 14.98ms  p99 42.85ms  max 565.74ms
+http_req_failed rate: 0.000%

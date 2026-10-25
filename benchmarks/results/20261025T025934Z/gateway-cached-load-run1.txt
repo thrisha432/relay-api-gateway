@@ -1,0 +1,7 @@
+ Container relay-k6-run-d2bd28813701 Creating 
+ Container relay-k6-run-d2bd28813701 Created 
+scenario: gateway-cached
+requests: 842872  rps: 7023.5
+latency: p50 6.75ms  p95 7.72ms  p99 13.68ms  max 517.24ms
+http_req_failed rate: 0.000%
+cache hit ratio: 99.73% (840627 hits / 2245 misses)

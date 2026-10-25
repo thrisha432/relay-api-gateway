@@ -1,0 +1,7 @@
+ Container relay-k6-run-6afd81efb3d6 Creating 
+ Container relay-k6-run-6afd81efb3d6 Created 
+scenario: gateway-cached
+requests: 839985  rps: 6999.4
+latency: p50 6.76ms  p95 7.79ms  p99 13.70ms  max 476.81ms
+http_req_failed rate: 0.000%
+cache hit ratio: 99.72% (837624 hits / 2361 misses)

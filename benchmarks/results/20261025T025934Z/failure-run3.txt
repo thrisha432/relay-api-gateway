@@ -1,0 +1,8 @@
+ Container relay-k6-run-796455be3447 Creating 
+ Container relay-k6-run-796455be3447 Created 
+time="2026-10-25T03:33:51Z" level=info msg="GATEWAY_COUNTERS {\"relay_retries_total\":7,\"relay_retries_exhausted_total\":0,\"relay_circuit_breaker_transitions_total\":3,\"relay_circuit_breaker_rejections_total\":2721,\"relay_no_healthy_upstream_total\":0}" source=console
+scenario: failure
+requests: 106169  rps: 1326.8
+latency: p50 5.90ms  p95 13.90ms  p99 31.48ms  max 811.14ms
+http_req_failed rate: 0.000%
+failure window: backend-b unhealthy + 503 from t=20s to t=50s

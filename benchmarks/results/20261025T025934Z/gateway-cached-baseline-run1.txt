@@ -1,0 +1,7 @@
+ Container relay-k6-run-ecf1676aad53 Creating 
+ Container relay-k6-run-ecf1676aad53 Created 
+scenario: gateway-cached
+requests: 406373  rps: 6772.5
+latency: p50 1.27ms  p95 2.57ms  p99 2.88ms  max 42.84ms
+http_req_failed rate: 0.000%
+cache hit ratio: 99.87% (405844 hits / 529 misses)

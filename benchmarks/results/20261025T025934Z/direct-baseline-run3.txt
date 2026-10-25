@@ -1,0 +1,6 @@
+ Container relay-k6-run-30d2c88e6fd2 Creating 
+ Container relay-k6-run-30d2c88e6fd2 Created 
+scenario: direct
+requests: 1160433  rps: 19340.3
+latency: p50 0.43ms  p95 0.87ms  p99 1.05ms  max 13.14ms
+http_req_failed rate: 0.000%

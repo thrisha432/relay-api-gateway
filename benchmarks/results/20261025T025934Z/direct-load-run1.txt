@@ -1,0 +1,6 @@
+ Container relay-k6-run-ffed55803c1e Creating 
+ Container relay-k6-run-ffed55803c1e Created 
+scenario: direct
+requests: 2454534  rps: 20453.9
+latency: p50 2.31ms  p95 2.90ms  p99 4.74ms  max 58.48ms
+http_req_failed rate: 0.000%

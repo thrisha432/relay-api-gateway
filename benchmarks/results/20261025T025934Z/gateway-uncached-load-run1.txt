@@ -1,0 +1,6 @@
+ Container relay-k6-run-99bd5f13daa4 Creating 
+ Container relay-k6-run-99bd5f13daa4 Created 
+scenario: gateway-uncached
+requests: 137507  rps: 1145.6
+latency: p50 32.41ms  p95 116.57ms  p99 177.23ms  max 435.59ms
+http_req_failed rate: 0.000%

@@ -1,0 +1,7 @@
+ Container relay-k6-run-2210def57b32 Creating 
+ Container relay-k6-run-2210def57b32 Created 
+scenario: gateway-cached
+requests: 417587  rps: 6959.5
+latency: p50 1.23ms  p95 2.50ms  p99 2.79ms  max 35.78ms
+http_req_failed rate: 0.000%
+cache hit ratio: 99.88% (417074 hits / 513 misses)

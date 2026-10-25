@@ -1,0 +1,6 @@
+ Container relay-k6-run-1ee82aa6820e Creating 
+ Container relay-k6-run-1ee82aa6820e Created 
+scenario: direct
+requests: 1177163  rps: 19618.6
+latency: p50 0.42ms  p95 0.86ms  p99 1.04ms  max 7.07ms
+http_req_failed rate: 0.000%
