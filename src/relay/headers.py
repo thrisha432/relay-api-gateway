@@ -41,7 +41,8 @@ _REQUEST_OVERRIDDEN = frozenset(
     }
 )
 # Response headers recomputed for the buffered body Relay returns.
-_RESPONSE_OVERRIDDEN = frozenset({b"content-length", b"x-request-id"})
+# x-relay-cache is Relay's own header; an upstream must not be able to spoof it.
+_RESPONSE_OVERRIDDEN = frozenset({b"content-length", b"x-request-id", b"x-relay-cache"})
 
 
 def connection_tokens(headers: Iterable[tuple[bytes, bytes]]) -> set[bytes]:

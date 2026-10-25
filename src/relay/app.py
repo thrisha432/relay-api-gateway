@@ -12,16 +12,19 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from prometheus_client import CONTENT_TYPE_LATEST
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from relay import __version__
+from relay.cache.response_cache import ResponseCache
 from relay.config import RelayConfig, load_config
 from relay.logging_config import configure_logging, get_logger
+from relay.metrics import RelayMetrics, method_label, status_class
 from relay.middleware import RequestContextMiddleware
-from relay.models import OPERATIONAL_ROUTE
+from relay.models import OPERATIONAL_ROUTE, RequestContext
 from relay.proxy import Gateway
 
 logger = get_logger("app")
@@ -31,14 +34,23 @@ def create_app(
     config: RelayConfig | None = None,
     *,
     http_client: httpx.AsyncClient | None = None,
+    cache: ResponseCache | None = None,
 ) -> FastAPI:
     """Build the Relay ASGI app.
 
-    ``http_client`` lets tests inject a client; normally the gateway creates
-    and owns one pooled client for the app's lifetime.
+    ``http_client`` and ``cache`` let tests inject dependencies; normally the
+    gateway creates and owns them for the app's lifetime.
     """
     config = config or load_config()
-    gateway = Gateway(config, http_client=http_client)
+    metrics = RelayMetrics()
+    gateway = Gateway(config, metrics=metrics, http_client=http_client, cache=cache)
+
+    def observe(ctx: RequestContext, method: str, status: int, duration: float) -> None:
+        metrics.requests_total.labels(
+            ctx.route_id, method_label(method), status_class(status)
+        ).inc()
+        if ctx.route_id != OPERATIONAL_ROUTE:
+            metrics.request_duration.labels(ctx.route_id).observe(duration)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -59,7 +71,12 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.gateway = gateway
-    app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(
+        RequestContextMiddleware,
+        observer=observe,
+        on_start=metrics.in_flight.inc,
+        on_end=metrics.in_flight.dec,
+    )
 
     def _ops(request: Request) -> None:
         request.scope["state"]["relay"].route_id = OPERATIONAL_ROUTE
@@ -76,6 +93,11 @@ def create_app(
         _ops(request)
         report = gateway.readiness()
         return JSONResponse(report, status_code=200 if report["status"] == "ready" else 503)
+
+    @app.get("/metrics")
+    async def prometheus_metrics(request: Request) -> Response:
+        _ops(request)
+        return Response(metrics.render(), media_type=CONTENT_TYPE_LATEST)
 
     if config.server.enable_route_summary:
 

@@ -3,20 +3,34 @@
 Pipeline order (see docs/ARCHITECTURE.md):
  1. Validate path/method and enforce the request body limit.
  2. Match a configured route (404 otherwise).
- 3. Pick a healthy upstream (round-robin over instances that pass health checks).
- 4. Forward with explicit timeouts.
- 5. Return the response with hop-by-hop headers removed.
+ 3. Cache lookup for eligible GET requests (a hit returns immediately).
+ 4. Pick a healthy upstream (round-robin over instances that pass health checks).
+ 5. Forward with explicit timeouts and a response-size cap.
+ 6. Fill the cache if the response is eligible.
+ 7. Return the response with hop-by-hop headers removed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import dataclass
 from enum import StrEnum
 
 import httpx
 from starlette.requests import Request
 from starlette.responses import Response
 
+from relay.cache.response_cache import (
+    CACHE_HEADER,
+    CachedResponse,
+    LocalResponseCache,
+    ResponseCache,
+    cache_key,
+    cacheable_headers,
+    request_bypass_reason,
+    response_ttl,
+)
 from relay.client_identity import ClientIdentityResolver
 from relay.config import RelayConfig, RouteConfig, UpstreamConfig
 from relay.errors import (
@@ -43,6 +57,7 @@ from relay.headers import (
 from relay.health import HealthChecker, HealthRegistry
 from relay.load_balancer import RoundRobinBalancer
 from relay.logging_config import get_logger
+from relay.metrics import RelayMetrics, status_class
 from relay.models import RequestContext, UpstreamResponse
 from relay.routing import InvalidPathError, Router, validate_raw_path
 
@@ -75,18 +90,52 @@ class UpstreamFailure(Exception):
         self.kind = kind
 
 
-class Gateway:
-    """Owns the shared HTTP client and runs the proxy pipeline."""
+@dataclass(slots=True)
+class ProxyRequest:
+    """Everything the pipeline needs about one validated, routed request."""
 
-    def __init__(self, config: RelayConfig, *, http_client: httpx.AsyncClient | None = None):
+    ctx: RequestContext
+    route: RouteConfig
+    method: str
+    raw_path: str
+    upstream_path: str
+    query: str
+    client_headers: RawHeaders
+    upstream_headers: RawHeaders
+    body: bytes
+    peer: str | None
+
+
+class Gateway:
+    """Owns the shared clients/state and runs the proxy pipeline."""
+
+    def __init__(
+        self,
+        config: RelayConfig,
+        *,
+        metrics: RelayMetrics | None = None,
+        http_client: httpx.AsyncClient | None = None,
+        cache: ResponseCache | None = None,
+    ) -> None:
         self.config = config
+        self.metrics = metrics or RelayMetrics()
         self.router = Router(config.routes)
         self.identity = ClientIdentityResolver(config.server.trusted_proxies)
         self.health = HealthRegistry(config.routes)
-        self.health_checker = HealthChecker(config.routes, self.health)
+        self.health_checker = HealthChecker(
+            config.routes, self.health, on_probe=self._observe_probe
+        )
         self.balancers = {r.id: RoundRobinBalancer(r.upstreams) for r in config.routes}
+        self.cache: ResponseCache = cache or LocalResponseCache(
+            config.cache.max_entries, on_evict=self.metrics.cache_evictions_total.inc
+        )
         self._client = http_client
         self._owns_client = http_client is None
+
+        self.health.add_listener(self._observe_health_change)
+        for route in config.routes:
+            for upstream in route.upstreams:
+                self.metrics.upstream_healthy.labels(route.id, upstream.id).set(1)
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -108,6 +157,7 @@ class Gateway:
 
     async def close(self) -> None:
         await self.health_checker.stop()
+        await self.cache.close()
         if self._client is not None and self._owns_client:
             await self._client.aclose()
         self._client = None
@@ -143,7 +193,7 @@ class Gateway:
             for r in self.config.routes
         ]
 
-    # ------------------------------------------------------------------ pipeline
+    # --------------------------------------------------------------- pipeline
 
     async def handle(self, request: Request) -> Response:
         ctx: RequestContext = request.scope["state"]["relay"]
@@ -154,105 +204,146 @@ class Gateway:
             return error_response(exc.spec, ctx.request_id, exc.headers)
 
     async def _handle(self, request: Request, ctx: RequestContext) -> Response:
+        preq = await self._prepare(request, ctx)
+
+        key: str | None = None
+        if preq.route.cache.enabled:
+            key, cached = await self._cache_lookup(preq)
+            if cached is not None:
+                return self._cached_response(cached)
+
+        result = await self._forward(preq)
+        response = build_client_response(result, preq.method)
+        if preq.route.cache.enabled:
+            if key is not None:
+                await self._cache_fill(preq, key, result)
+            response.raw_headers.append((CACHE_HEADER, ctx.cache.upper().encode()))
+        return response
+
+    async def _prepare(self, request: Request, ctx: RequestContext) -> ProxyRequest:
         method = request.method.upper()
         raw_path = self._raw_path(request)
         if method not in PROXY_METHODS:
             raise GatewayError(METHOD_NOT_ALLOWED)
-
         match = self.router.match(raw_path)
         if match is None:
             raise GatewayError(ROUTE_NOT_FOUND)
-        route = match.route
-        ctx.route_id = route.id
-
+        ctx.route_id = match.route.id
         body = await self._read_body(request)
-        query = request.scope.get("query_string", b"").decode("latin-1")
-        headers = self._upstream_headers(request, ctx)
+        client_headers = list(request.headers.raw)
+        peer = request.client.host if request.client else None
+        return ProxyRequest(
+            ctx=ctx,
+            route=match.route,
+            method=method,
+            raw_path=raw_path,
+            upstream_path=match.upstream_path,
+            query=request.scope.get("query_string", b"").decode("latin-1"),
+            client_headers=client_headers,
+            upstream_headers=self._upstream_headers(request, client_headers, peer, ctx),
+            body=body,
+            peer=peer,
+        )
 
+    # ------------------------------------------------------------------ cache
+
+    async def _cache_lookup(self, preq: ProxyRequest) -> tuple[str | None, CachedResponse | None]:
+        route = preq.route
+        reason = request_bypass_reason(preq.method, preq.client_headers)
+        if reason is not None:
+            preq.ctx.cache = "bypass"
+            self.metrics.cache_requests_total.labels(route.id, "bypass").inc()
+            return None, None
+        key = cache_key(
+            route.id, preq.raw_path, preq.query, preq.client_headers, route.cache.vary_headers
+        )
+        cached = await self.cache.get(key)
+        preq.ctx.cache = "hit" if cached is not None else "miss"
+        self.metrics.cache_requests_total.labels(route.id, preq.ctx.cache).inc()
+        return key, cached
+
+    async def _cache_fill(self, preq: ProxyRequest, key: str, result: UpstreamResponse) -> None:
+        ttl = response_ttl(result.status, result.headers, len(result.body), preq.route.cache)
+        if ttl is None:
+            self.metrics.cache_stores_total.labels(preq.route.id, "not_cacheable").inc()
+            return
+        entry = CachedResponse(
+            status=result.status,
+            headers=cacheable_headers(result.headers),
+            body=result.body,
+            stored_at=time.time(),
+        )
+        await self.cache.set(key, entry, ttl)
+        self.metrics.cache_stores_total.labels(preq.route.id, "stored").inc()
+
+    @staticmethod
+    def _cached_response(cached: CachedResponse) -> Response:
+        response = build_client_response(
+            UpstreamResponse(status=cached.status, headers=cached.headers, body=cached.body),
+            "GET",
+        )
+        response.raw_headers.append((b"age", str(cached.age_seconds()).encode()))
+        response.raw_headers.append((CACHE_HEADER, b"HIT"))
+        return response
+
+    # -------------------------------------------------------------- upstream
+
+    async def _forward(self, preq: ProxyRequest) -> UpstreamResponse:
+        route = preq.route
         candidates = self.balancers[route.id].candidates(
             lambda u: self.health.is_healthy(route.id, u.id)
         )
         if not candidates:
+            self.metrics.no_healthy_upstream_total.labels(route.id).inc()
             raise GatewayError(NO_HEALTHY_UPSTREAM)
         upstream = candidates[0]
-        ctx.upstream_id = upstream.id
-        ctx.attempts = 1
+        preq.ctx.upstream_id = upstream.id
+        preq.ctx.attempts = 1
         try:
-            result = await self._send_once(
-                route, upstream, method, match.upstream_path, query, headers, body
-            )
+            return await self._attempt(preq, upstream, route.timeouts.attempt_seconds)
         except UpstreamFailure as failure:
             raise GatewayError(_FAILURE_ERRORS[failure.kind]) from None
-        return build_client_response(result, method)
 
-    # ------------------------------------------------------------------ helpers
-
-    @staticmethod
-    def _raw_path(request: Request) -> str:
-        raw = request.scope.get("raw_path") or request.scope["path"].encode("utf-8")
+    async def _attempt(
+        self, preq: ProxyRequest, upstream: UpstreamConfig, budget: float
+    ) -> UpstreamResponse:
+        """One upstream attempt, instrumented with latency and outcome metrics."""
+        start = time.perf_counter()
+        outcome = "unknown"
         try:
-            raw_path = raw.decode("ascii")
-            validate_raw_path(raw_path)
-        except (UnicodeDecodeError, InvalidPathError):
-            raise GatewayError(INVALID_REQUEST) from None
-        return raw_path
-
-    async def _read_body(self, request: Request) -> bytes:
-        """Read the request body, enforcing max_request_body_bytes while streaming."""
-        limit = self.config.server.max_request_body_bytes
-        declared = request.headers.get("content-length")
-        if declared is not None:
-            if not declared.isdigit():
-                raise GatewayError(INVALID_REQUEST)
-            if int(declared) > limit:
-                raise GatewayError(PAYLOAD_TOO_LARGE)
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in request.stream():
-            total += len(chunk)
-            if total > limit:
-                raise GatewayError(PAYLOAD_TOO_LARGE)
-            chunks.append(chunk)
-        return b"".join(chunks)
-
-    def _upstream_headers(self, request: Request, ctx: RequestContext) -> RawHeaders:
-        raw = list(request.headers.raw)
-        headers = filter_request_headers(raw)
-        peer = request.client.host if request.client else None
-        prior = [v.decode("latin-1") for v in get_all(raw, b"x-forwarded-for")]
-        xff = self.identity.forwarded_for_header(peer, prior)
-        headers.append((b"x-forwarded-for", xff.encode("latin-1")))
-        headers.append((b"x-forwarded-proto", request.url.scheme.encode("ascii")))
-        host = get_header(raw, b"host")
-        if host:
-            headers.append((b"x-forwarded-host", host))
-        headers.append((b"x-request-id", ctx.request_id.encode("ascii")))
-        return headers
+            result = await self._send_once(preq, upstream, budget)
+            outcome = status_class(result.status)
+            return result
+        except UpstreamFailure as failure:
+            outcome = failure.kind.value
+            raise
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            route_id = preq.route.id
+            self.metrics.upstream_duration.labels(route_id, upstream.id).observe(
+                time.perf_counter() - start
+            )
+            self.metrics.upstream_requests_total.labels(route_id, upstream.id, outcome).inc()
 
     async def _send_once(
-        self,
-        route: RouteConfig,
-        upstream: UpstreamConfig,
-        method: str,
-        path: str,
-        query: str,
-        headers: RawHeaders,
-        body: bytes,
-        budget_seconds: float | None = None,
+        self, preq: ProxyRequest, upstream: UpstreamConfig, budget: float
     ) -> UpstreamResponse:
-        """One upstream attempt with bounded time and response size."""
-        timeouts = route.timeouts
-        budget = min(timeouts.attempt_seconds, budget_seconds or timeouts.attempt_seconds)
-        url = f"{upstream.url}{path}" + (f"?{query}" if query else "")
+        """Send one request with bounded time and response size; no retries here."""
+        timeouts = preq.route.timeouts
+        url = f"{upstream.url}{preq.upstream_path}" + (f"?{preq.query}" if preq.query else "")
         request = self.client.build_request(
-            method,
+            preq.method,
             url,
-            headers=headers,
-            content=body or None,
+            headers=preq.upstream_headers,
+            content=preq.body or None,
             timeout=httpx.Timeout(budget, connect=min(timeouts.connect_seconds, budget)),
         )
         limit = self.config.server.max_response_body_bytes
         try:
+            # asyncio.timeout bounds the whole attempt (connect + headers + body);
+            # httpx's own timeouts bound each individual socket operation.
             async with asyncio.timeout(budget):
                 response = await self.client.send(request, stream=True)
                 try:
@@ -285,6 +376,59 @@ class Gateway:
             body=b"".join(chunks),
             upstream_id=upstream.id,
         )
+
+    # ---------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _raw_path(request: Request) -> str:
+        raw = request.scope.get("raw_path") or request.scope["path"].encode("utf-8")
+        try:
+            raw_path = raw.decode("ascii")
+            validate_raw_path(raw_path)
+        except (UnicodeDecodeError, InvalidPathError):
+            raise GatewayError(INVALID_REQUEST) from None
+        return raw_path
+
+    async def _read_body(self, request: Request) -> bytes:
+        """Read the request body, enforcing max_request_body_bytes while streaming."""
+        limit = self.config.server.max_request_body_bytes
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            if not declared.isdigit():
+                raise GatewayError(INVALID_REQUEST)
+            if int(declared) > limit:
+                raise GatewayError(PAYLOAD_TOO_LARGE)
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > limit:
+                raise GatewayError(PAYLOAD_TOO_LARGE)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def _upstream_headers(
+        self, request: Request, raw: RawHeaders, peer: str | None, ctx: RequestContext
+    ) -> RawHeaders:
+        headers = filter_request_headers(raw)
+        prior = [v.decode("latin-1") for v in get_all(raw, b"x-forwarded-for")]
+        xff = self.identity.forwarded_for_header(peer, prior)
+        headers.append((b"x-forwarded-for", xff.encode("latin-1")))
+        headers.append((b"x-forwarded-proto", request.url.scheme.encode("ascii")))
+        host = get_header(raw, b"host")
+        if host:
+            headers.append((b"x-forwarded-host", host))
+        headers.append((b"x-request-id", ctx.request_id.encode("ascii")))
+        return headers
+
+    # ------------------------------------------------------------ observers
+
+    def _observe_probe(self, route_id: str, upstream_id: str, ok: bool) -> None:
+        result = "success" if ok else "failure"
+        self.metrics.health_checks_total.labels(route_id, upstream_id, result).inc()
+
+    def _observe_health_change(self, route_id: str, upstream_id: str, healthy: bool) -> None:
+        self.metrics.upstream_healthy.labels(route_id, upstream_id).set(1 if healthy else 0)
 
 
 def build_client_response(upstream: UpstreamResponse, method: str) -> Response:
