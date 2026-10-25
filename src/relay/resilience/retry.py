@@ -50,6 +50,6 @@ class RetryPolicy:
         """Delay before the next attempt, given how many attempts already ran."""
         ceiling = min(
             self._cfg.backoff_max_seconds,
-            self._cfg.backoff_base_seconds * (2 ** max(0, attempts_made - 1)),
+            self._cfg.backoff_base_seconds * (2.0 ** max(0, attempts_made - 1)),
         )
         return self._rng() * ceiling

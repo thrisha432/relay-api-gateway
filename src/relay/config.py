@@ -106,7 +106,7 @@ class RedisConfig(_Strict):
     @field_validator("url")
     @classmethod
     def _valid_url(cls, value: str | None) -> str | None:
-        if value in (None, ""):
+        if not value:
             return None
         if not value.startswith(("redis://", "rediss://", "unix://")):
             raise ValueError("must start with redis://, rediss:// or unix://")

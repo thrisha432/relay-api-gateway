@@ -11,6 +11,8 @@ process (as the tests do) without duplicate-metric errors.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Iterator, Sequence
+
 from prometheus_client import (
     CollectorRegistry,
     Counter,
@@ -18,7 +20,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from prometheus_client.core import GaugeMetricFamily
+from prometheus_client.core import GaugeMetricFamily, Metric
 from prometheus_client.process_collector import ProcessCollector
 from prometheus_client.registry import Collector
 
@@ -185,17 +187,23 @@ class CallbackGauge(Collector):
     from the breaker's real state.
     """
 
-    def __init__(self, name: str, documentation: str, labels: list[str], callback) -> None:
+    def __init__(
+        self,
+        name: str,
+        documentation: str,
+        labels: list[str],
+        callback: Callable[[], Iterable[tuple[Sequence[str], float]]],
+    ) -> None:
         self._name = name
         self._doc = documentation
         self._labels = labels
         self._callback = callback
 
-    def collect(self):
+    def collect(self) -> Iterator[Metric]:
         family = GaugeMetricFamily(self._name, self._doc, labels=self._labels)
         for label_values, value in self._callback():
             family.add_metric(list(label_values), value)
         yield family
 
-    def describe(self):
+    def describe(self) -> list[Metric]:
         return [GaugeMetricFamily(self._name, self._doc, labels=self._labels)]

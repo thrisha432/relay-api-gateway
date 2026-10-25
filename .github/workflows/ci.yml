@@ -19,6 +19,10 @@ jobs:
       - run: pip install -r requirements-dev.lock && pip install --no-deps -e .
       - run: ruff check .
       - run: ruff format --check .
+      - name: Type check (mypy --strict)
+        run: mypy
+      - name: Dependency vulnerability scan
+        run: pip-audit -r requirements.lock
 
   test:
     runs-on: ubuntu-latest

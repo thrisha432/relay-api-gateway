@@ -25,6 +25,7 @@ loop "check for an in-flight task, otherwise create one" is atomic.
 from __future__ import annotations
 
 import asyncio
+import functools
 from collections.abc import Awaitable, Callable
 
 
@@ -45,7 +46,7 @@ class SingleFlight[K, V]:
         if task is None:
             task = asyncio.ensure_future(fn())
             self._inflight[key] = task
-            task.add_done_callback(lambda t, k=key: self._done(k, t))
+            task.add_done_callback(functools.partial(self._done, key))
         return await asyncio.shield(task), shared
 
     def _done(self, key: K, task: asyncio.Task[V]) -> None:

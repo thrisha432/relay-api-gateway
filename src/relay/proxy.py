@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -626,7 +627,7 @@ class Gateway:
 
     @staticmethod
     def _raw_path(request: Request) -> str:
-        raw = request.scope.get("raw_path") or request.scope["path"].encode("utf-8")
+        raw: bytes = request.scope.get("raw_path") or request.scope["path"].encode("utf-8")
         try:
             raw_path = raw.decode("ascii")
             validate_raw_path(raw_path)
@@ -675,7 +676,9 @@ class Gateway:
     def _observe_health_change(self, route_id: str, upstream_id: str, healthy: bool) -> None:
         self.metrics.upstream_healthy.labels(route_id, upstream_id).set(1 if healthy else 0)
 
-    def _breaker_listener(self, route_id: str, upstream_id: str):
+    def _breaker_listener(
+        self, route_id: str, upstream_id: str
+    ) -> Callable[[BreakerState, BreakerState], None]:
         def on_transition(old: BreakerState, new: BreakerState) -> None:
             self.metrics.circuit_transitions_total.labels(
                 route_id, upstream_id, old.value, new.value

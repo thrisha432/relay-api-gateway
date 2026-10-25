@@ -8,6 +8,8 @@ Redis fail fast so the configured outage policy can kick in.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
+from typing import cast
 
 from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
@@ -39,6 +41,7 @@ def create_redis(cfg: RedisConfig) -> Redis:
 async def ping(redis: Redis, timeout_seconds: float) -> bool:
     try:
         async with asyncio.timeout(timeout_seconds):
-            return bool(await redis.ping())
+            # redis-py types ping() as "Awaitable[bool] | bool" (sync and async share stubs).
+            return bool(await cast(Awaitable[bool], redis.ping()))
     except REDIS_ERRORS:
         return False

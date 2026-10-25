@@ -67,6 +67,16 @@ ignore = [
 # PromQL strings read better unwrapped.
 "scripts/build_dashboard.py" = ["E501", "UP031"]
 
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+strict = true
+warn_unreachable = true
+# Third-party packages without complete type information.
+[[tool.mypy.overrides]]
+module = ["fakeredis.*", "lupa.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

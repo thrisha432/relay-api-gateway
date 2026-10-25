@@ -31,7 +31,7 @@ def _request_id_from(scope: Scope) -> str:
     """Reuse a well-formed incoming X-Request-ID, otherwise generate one."""
     for name, value in scope.get("headers", []):
         if name == b"x-request-id" and _REQUEST_ID_RE.match(value):
-            return value.decode("ascii")
+            return str(value.decode("ascii"))
     return uuid.uuid4().hex
 
 
