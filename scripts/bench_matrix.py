@@ -232,6 +232,12 @@ def wait_for_closed_breakers(timeout: float = 30.0) -> None:
 
 def run_cell(cell: Cell, rep: int, duration: str, raw_dir: Path, attempt: int = 1) -> dict:
     base, route, keys, container = MODES[cell.mode]
+    if cell.experiment == "openloop":
+        # Overload cells can leave a gateway collapsed (that is what the
+        # unlimited variant demonstrates). Start every cell from a fresh
+        # process so no cell inherits another's breaker state.
+        compose("restart", container)
+        time.sleep(6)
     wait_for_closed_breakers()
     out_name = f"{cell.name}-rep{rep}.json"
     for b in BACKENDS:
