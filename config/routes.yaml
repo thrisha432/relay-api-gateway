@@ -74,23 +74,31 @@ routes:
     retries:
       max_attempts: 1                 # no retries for this route
 
-  # Benchmark-only route: no rate limit, no cache, so k6 measures pure proxy overhead.
+  # Benchmark routes. Single upstream (backend-a), exactly like the direct
+  # baseline, so direct-vs-gateway compares the same backend work. No rate
+  # limit, so k6 measures proxy overhead rather than 429s.
   - id: "bench"
     path_prefix: "/api/bench"
     upstreams:
       - id: "bench-a"
         url: "http://backend-a:8001"
-      - id: "bench-b"
-        url: "http://backend-b:8002"
 
-  # Same backends with caching on, for the cache-friendly benchmark scenario.
+  # Same as "bench" with caching on, for the cache-friendly scenario.
   - id: "bench-cached"
     path_prefix: "/api/bench-cached"
     upstreams:
       - id: "bench-cached-a"
         url: "http://backend-a:8001"
-      - id: "bench-cached-b"
-        url: "http://backend-b:8002"
     cache:
       enabled: true
       ttl_seconds: 30
+
+  # Two upstreams, no rate limit: used by the failure-injection benchmark and
+  # the round-robin demo.
+  - id: "bench-ha"
+    path_prefix: "/api/bench-ha"
+    upstreams:
+      - id: "bench-ha-a"
+        url: "http://backend-a:8001"
+      - id: "bench-ha-b"
+        url: "http://backend-b:8002"

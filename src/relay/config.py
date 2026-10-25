@@ -73,6 +73,11 @@ class ServerConfig(_Strict):
     # Exposes GET /__relay/routes (route ids, upstream ids, health; no URLs).
     enable_route_summary: bool = True
     shutdown_grace_seconds: float = Field(default=5.0, gt=0, le=60)
+    # Upstream connection pool (shared by all routes). httpcore scans the pool
+    # on every request, so idle connections beyond what concurrency needs cost
+    # CPU; see docs/ARCHITECTURE.md "Performance notes".
+    upstream_max_connections: int = Field(default=100, ge=1, le=10_000)
+    upstream_max_keepalive_connections: int = Field(default=20, ge=0, le=10_000)
 
     @field_validator("trusted_proxies")
     @classmethod

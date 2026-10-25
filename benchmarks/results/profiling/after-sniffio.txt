@@ -1,0 +1,6 @@
+requests: 27734  rps: 1386.4
+latency: p50 5.41ms  p95 14.56ms  p99 39.44ms  max 223.78ms
+requests: 27708  rps: 1385.1
+latency: p50 5.44ms  p95 14.80ms  p99 39.09ms  max 258.12ms
+requests: 28567  rps: 1428.1
+latency: p50 5.31ms  p95 14.23ms  p99 38.50ms  max 199.27ms

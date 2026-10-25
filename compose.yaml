@@ -1,0 +1,121 @@
+# Relay local demo stack. Every published port binds to 127.0.0.1 only:
+# this is a local portfolio demo, not an internet-facing deployment.
+#
+#   docker compose up -d --build            gateway, backends, redis, monitoring
+#   docker compose --profile multi up -d    + a second gateway on :8081
+#   docker compose --profile bench run --rm k6 run /scripts/gateway.js
+
+name: relay
+
+x-backend: &backend
+  build: .
+  image: relay:local
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"PORT\"]}/health', timeout=1)"]
+    interval: 3s
+    timeout: 2s
+    retries: 10
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # No published port: only containers on this network can reach Redis.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  backend-a:
+    <<: *backend
+    environment:
+      MOCK_INSTANCE_NAME: backend-a
+      PORT: "8001"
+    command: ["uvicorn", "mock_backend.app:app", "--host", "0.0.0.0", "--port", "8001",
+              "--no-access-log", "--log-level", "warning"]
+    ports: ["127.0.0.1:8001:8001"]
+
+  backend-b:
+    <<: *backend
+    environment:
+      MOCK_INSTANCE_NAME: backend-b
+      PORT: "8002"
+    command: ["uvicorn", "mock_backend.app:app", "--host", "0.0.0.0", "--port", "8002",
+              "--no-access-log", "--log-level", "warning"]
+    ports: ["127.0.0.1:8002:8002"]
+
+  relay:
+    build: .
+    image: relay:local
+    restart: unless-stopped
+    environment:
+      RELAY_CONFIG: /app/config/routes.yaml
+      RELAY_REDIS_URL: ${RELAY_REDIS_URL:-redis://redis:6379/0}
+      RELAY_LOG_LEVEL: ${RELAY_LOG_LEVEL:-INFO}
+      RELAY_LOG_JSON: ${RELAY_LOG_JSON:-true}
+    volumes:
+      - ./config:/app/config:ro
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      redis: { condition: service_healthy }
+      backend-a: { condition: service_healthy }
+      backend-b: { condition: service_healthy }
+
+  relay-2:
+    profiles: ["multi"]
+    build: .
+    image: relay:local
+    restart: unless-stopped
+    environment:
+      RELAY_CONFIG: /app/config/routes.yaml
+      RELAY_REDIS_URL: ${RELAY_REDIS_URL:-redis://redis:6379/0}
+      RELAY_LOG_LEVEL: ${RELAY_LOG_LEVEL:-INFO}
+    volumes:
+      - ./config:/app/config:ro
+    ports: ["127.0.0.1:8081:8080"]
+    depends_on:
+      redis: { condition: service_healthy }
+      backend-a: { condition: service_healthy }
+      backend-b: { condition: service_healthy }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+    depends_on: [relay]
+
+  grafana:
+    image: grafana/grafana:12.0.2
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Read-only anonymous access so the demo dashboard opens without a login.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/relay.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [prometheus]
+
+  k6:
+    profiles: ["bench"]
+    image: grafana/k6:1.1.0
+    volumes:
+      - ./benchmarks/k6:/scripts:ro
+      - ./benchmarks/results:/results
+    environment:
+      GATEWAY_URL: http://relay:8080
+      DIRECT_URL: http://backend-a:8001

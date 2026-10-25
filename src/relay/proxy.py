@@ -195,7 +195,10 @@ class Gateway:
             # pick up HTTP(S)_PROXY from the environment; redirects are returned
             # to the client rather than followed by the gateway.
             self._client = httpx.AsyncClient(
-                limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
+                limits=httpx.Limits(
+                    max_connections=self.config.server.upstream_max_connections,
+                    max_keepalive_connections=self.config.server.upstream_max_keepalive_connections,
+                ),
                 follow_redirects=False,
                 trust_env=False,
             )
