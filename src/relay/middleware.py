@@ -42,8 +42,10 @@ class RequestContextMiddleware:
         observer: RequestObserver | None = None,
         on_start: Callable[[], None] | None = None,
         on_end: Callable[[], None] | None = None,
+        access_log: bool = True,
     ) -> None:
         self.app = app
+        self.access_log = access_log
         self.observer = observer
         self.on_start = on_start
         self.on_end = on_end
@@ -87,7 +89,8 @@ class RequestContextMiddleware:
             method = scope.get("method", "")
             if self.observer:
                 self.observer(ctx, method, status, duration)
-            _log_access(ctx, method, status, duration)
+            if self.access_log:
+                _log_access(ctx, method, status, duration)
 
 
 async def _send_internal_error(send: Send, request_id: str) -> None:

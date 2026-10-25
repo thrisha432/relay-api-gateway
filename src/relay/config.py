@@ -77,6 +77,9 @@ class ServerConfig(_Strict):
     trusted_proxies: tuple[str, ...] = ()
     # Exposes GET /__relay/routes (route ids, upstream ids, health; no URLs).
     enable_route_summary: bool = True
+    # One JSON access-log line per request. Switchable so its cost can be
+    # measured (benchmarks/: ablation); keep it on in normal operation.
+    access_log: bool = True
     shutdown_grace_seconds: float = Field(default=5.0, gt=0, le=60)
     # Upstream connection pool (shared by all routes). httpcore scans the pool
     # on every request, so idle connections beyond what concurrency needs cost
@@ -436,6 +439,10 @@ def load_config(path: str | os.PathLike[str] | None = None) -> RelayConfig:
     if not isinstance(raw, dict):
         raise ConfigError(f"config file {config_path} must contain a YAML mapping")
 
+    access_log = os.environ.get("RELAY_ACCESS_LOG")
+    if access_log is not None:
+        enabled = access_log.strip().lower() not in ("0", "false", "no")
+        raw = {**raw, "server": {**(raw.get("server") or {}), "access_log": enabled}}
     redis_override = os.environ.get("RELAY_REDIS_URL")
     if redis_override:
         raw = {**raw, "redis": {**(raw.get("redis") or {}), "url": redis_override}}

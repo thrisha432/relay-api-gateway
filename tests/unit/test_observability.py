@@ -72,7 +72,7 @@ def test_metric_label_normalisation_is_bounded() -> None:
 
 def test_cli_check_validates_config(capsys, tmp_path) -> None:
     assert main(["--config", str(ROOT / "config" / "routes.yaml"), "--check"]) == 0
-    assert "config OK: 5 route(s)" in capsys.readouterr().out
+    assert "config OK: 9 route(s)" in capsys.readouterr().out
     bad = tmp_path / "bad.yaml"
     bad.write_text("routes: []\n")
     assert main(["--config", str(bad), "--check"]) == 2

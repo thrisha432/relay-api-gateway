@@ -84,6 +84,7 @@ def create_app(
         observer=observe,
         on_start=metrics.in_flight.inc,
         on_end=metrics.in_flight.dec,
+        access_log=config.server.access_log,
     )
 
     def _ops(request: Request) -> None:

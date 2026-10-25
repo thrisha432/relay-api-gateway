@@ -19,13 +19,14 @@ def minimal(**route_overrides):
 
 def test_repository_config_is_valid() -> None:
     config = load_config(ROOT / "config" / "routes.yaml")
-    assert [r.id for r in config.routes] == [
+    assert [r.id for r in config.routes][:5] == [
         "catalog",
         "orders",
         "bench",
         "bench-cached",
         "bench-ha",
     ]
+    assert all(r.id.startswith("bench") for r in config.routes[5:])
     assert config.redis.fail_open_for_rate_limit is False
 
 

@@ -102,3 +102,48 @@ routes:
         url: "http://backend-a:8001"
       - id: "bench-ha-b"
         url: "http://backend-b:8002"
+
+  # ---- Benchmark-only routes (benchmarks/README.md) ------------------------
+  # Same backends; each isolates one feature so its effect can be measured.
+
+  # Rate limiting on, but with a limit no benchmark reaches: measures the cost
+  # of the Redis Lua round trip, and is the route the Redis-outage chaos run uses.
+  - id: "bench-limited"
+    path_prefix: "/api/bench-limited"
+    upstreams:
+      - id: "bench-limited-a"
+        url: "http://backend-a:8001"
+    rate_limit:
+      capacity: 1000000
+      refill_rate_per_second: 1000000
+
+  # Cache with coalescing disabled: the "before" side of the stampede benchmark.
+  - id: "bench-nocoalesce"
+    path_prefix: "/api/bench-nocoalesce"
+    upstreams:
+      - id: "bench-nocoalesce-a"
+        url: "http://backend-a:8001"
+    cache:
+      enabled: true
+      ttl_seconds: 30
+      coalesce: false
+
+  # Brownout benchmark: retries enabled with (budget) and without (nobudget)
+  # a retry budget. The breaker threshold is high so only the budget limits
+  # retry amplification.
+  - id: "bench-budget"
+    path_prefix: "/api/bench-budget"
+    upstreams:
+      - { id: "bench-budget-a", url: "http://backend-a:8001" }
+      - { id: "bench-budget-b", url: "http://backend-b:8002" }
+    retries: { max_attempts: 3, budget_enabled: true }   # default budget: 20% of requests
+    circuit_breaker: { failure_threshold: 1000 }
+    health_check: { enabled: false }
+  - id: "bench-nobudget"
+    path_prefix: "/api/bench-nobudget"
+    upstreams:
+      - { id: "bench-nobudget-a", url: "http://backend-a:8001" }
+      - { id: "bench-nobudget-b", url: "http://backend-b:8002" }
+    retries: { max_attempts: 3, budget_enabled: false }
+    circuit_breaker: { failure_threshold: 1000 }
+    health_check: { enabled: false }
