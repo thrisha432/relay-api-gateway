@@ -27,7 +27,7 @@ what happens when things fail. It describes the code as implemented.
 |---|---|
 | `config.py` | Pydantic schema; YAML + env loading; defaults merging; startup validation |
 | `app.py` | ASGI app factory, lifespan (start/stop), operational endpoints |
-| `middleware.py` | Request IDs, in-flight gauge, request metrics, access log, last-resort JSON 500 |
+| `middleware.py` | Admission control (load shedding), header limits, request IDs, in-flight gauge, request metrics, access log, last-resort JSON 500 |
 | `proxy.py` | `Gateway`: owns clients/state and runs the request pipeline |
 | `routing.py` | Path validation and longest-prefix matching |
 | `headers.py` | Hop-by-hop filtering on raw header bytes |
@@ -36,18 +36,28 @@ what happens when things fail. It describes the code as implemented.
 | `cache/lru.py` | From-scratch LRU (hash map + doubly linked list) |
 | `cache/response_cache.py` | Cache eligibility policy, cache key, local backend |
 | `cache/redis_cache.py` | Shared Redis cache backend |
+| `cache/singleflight.py` | Coalesces concurrent misses for one key into one upstream request |
 | `load_balancer.py` | Health-aware round-robin |
 | `health.py` | Active health checks and per-upstream health state |
 | `resilience/circuit_breaker.py` | Closed / open / half-open state machine |
 | `resilience/retry.py`, `resilience/timeouts.py` | Retry eligibility, jittered backoff, deadlines |
+| `resilience/retry_budget.py` | Caps aggregate retries at a fraction of traffic |
 | `metrics.py` | Prometheus registry with bounded labels |
 | `mock_backend/app.py` | Deterministic upstream used by tests, demo, and benchmarks |
 
 ## Request pipeline
 
-The order below is implemented in `Gateway._handle` / `_forward`. It follows
-the spec's recommended order with two deliberate changes, called out in bold.
+The order below is implemented in the middleware stack and in
+`Gateway._handle` / `_forward`. It follows the spec's recommended order with
+deliberate changes, called out in bold.
 
+0. **Admission control** (outermost middleware). If `max_in_flight` proxied
+   requests are already in progress, reply at once with 503 `overloaded` and
+   `Retry-After: 1`, before routing, logging, or any other per-request work.
+   *Added after the open-loop benchmark exposed a metastable failure (see
+   "Overload and admission control").* Header limits come next: more than
+   `max_header_bytes`/`max_header_count` gives 431, and an HTTP/1.1 request
+   without `Host` gives 400.
 1. **Validate the path and method.** The path must be origin-form ASCII with
    no dot segments, even encoded ones like `%2e%2e` or `..%2F` (400).
    `TRACE`/`CONNECT` and unknown methods get 405.
@@ -60,7 +70,9 @@ the spec's recommended order with two deliberate changes, called out in bold.
 4. **Read the request body**, capped at `max_request_body_bytes` (413).
    *Changed order: body reading moved after rate limiting, so a limited client
    cannot make the gateway buffer a large body first.*
-5. **Cache lookup** for eligible GETs. A hit returns immediately.
+5. **Cache lookup** for eligible GETs. A hit returns immediately. On a miss,
+   concurrent requests for the same key are **coalesced**: one fetches, the
+   rest wait for its result.
    *Consequence: a cache hit is served even when every upstream is unhealthy,
    and cache hits still consume a rate-limit token (the limiter runs first).*
 6. **Select an upstream**: round-robin over healthy instances, skipping any
@@ -68,7 +80,8 @@ the spec's recommended order with two deliberate changes, called out in bold.
    `circuit_open` if none is left).
 7. **Forward** with a per-attempt budget of `min(attempt_seconds, time left
    in the request deadline)`. Safe methods are retried on transient failures,
-   preferring an instance not yet tried.
+   preferring an instance not yet tried, as long as the route's **retry
+   budget** allows.
 8. **Record** the breaker outcome, upstream latency, and outcome metrics.
 9. **Fill the cache** if the response is eligible.
 10. **Respond** with hop-by-hop headers removed, plus `X-Request-ID`,
@@ -101,6 +114,87 @@ the spec's recommended order with two deliberate changes, called out in bold.
 * **Errors never leak internals.** Transport exceptions map to fixed error
   codes. Unexpected exceptions are logged with a traceback and answered with a
   generic JSON 500.
+
+## Overload and admission control
+
+**The failure it prevents (measured, not hypothetical).** In the v0.1
+open-loop benchmark, offered load above capacity (1,200 req/s against about
+1,100 req/s of capacity) caused this chain:
+
+1. Requests queued in the event loop until they exceeded the 2 s attempt
+   timeout, producing 504s.
+2. The circuit breaker counted those self-inflicted timeouts against a
+   *healthy* upstream and opened.
+3. Half-open probes also timed out under the same overload, so the breaker
+   stayed open.
+
+Error rates were 93.5% at 1,200 req/s and 100% at 1,400 and 1,600 req/s, with
+zero requests reaching the backend. This is a *metastable* failure: the system
+stays down while the trigger persists, even though nothing downstream is
+broken.
+
+**The fix.** Bound the work admitted. `AdmissionMiddleware` caps proxied
+requests in flight at `server.max_in_flight` and answers the rest with an
+immediate 503 `overloaded` + `Retry-After: 1`.
+
+* **Rejection must be cheap.** It runs in the outermost middleware with a
+  pre-encoded body: no routing, no request context, no access-log line (a
+  counter still records it). Shedding inside the gateway pipeline was measured
+  first and was not good enough. At 1.6× overload, goodput fell to about 525
+  req/s, because CPU spent *rejecting* starved the admitted requests.
+* **Size by Little's law:** limit ≈ throughput × acceptable queueing delay.
+  A limit of 32 held goodput at about 1,000–1,100 req/s with p99 about 110–130
+  ms at 1.6× overload; a limit of 128 let p99 rise to about 530 ms. The
+  default is **64** (about 1,100 req/s × about 50 ms). The full v1 open-loop
+  sweep compares it against the limit disabled.
+* **Health and metrics are never shed.** Probes and scrapes keep working under
+  overload, so orchestrators see "alive but busy", not "dead".
+* **Shedding is not an upstream failure.** It never touches breakers.
+* **Visibility:** `relay_load_shed_total{route}` and
+  `relay_event_loop_lag_seconds` (how late a 100 ms timer fires). Event-loop
+  lag separates "the gateway is saturated" from "the upstream is slow", which
+  is exactly the confusion that caused the metastable failure.
+
+Not implemented: an *adaptive* limit (AIMD / gradient, as in Netflix's
+concurrency-limits). A static limit is predictable and explainable but must be
+re-sized when capacity changes.
+
+## Upstream connection pool: a design constraint (audit A16)
+
+The open-loop benchmark also exposed a **critical** bug. After an overload
+spike, every route returned 504 *forever*, while the backend answered directly
+in 1 ms. The cause was an httpcore race (present in 1.0.9, the latest
+release):
+
+* Request R waits in the pool queue. Another task creates connection C and
+  assigns it to R.
+* If R's wait then ends with an exception before R resumes (an external cancel
+  such as `asyncio.timeout`, *or httpcore's own `PoolTimeout`*), R leaves the
+  queue but C is never closed.
+* C has never dialed, so it is never closed, expired, idle, or available: one
+  pool slot lost permanently. Repeated overload loses all of them.
+
+Relay's defenses:
+
+1. **No external cancellation of httpx.** Each phase uses httpx's own timeout
+   (pool, connect, read, write), and the whole-attempt budget is checked
+   cooperatively after the response headers and between body chunks. The
+   trade-off: one stalled read can overrun the attempt budget by up to the
+   read timeout (which equals the budget), so a worst-case attempt is bounded
+   by about 2× the budget instead of exactly 1×.
+2. **Requests never wait in the pool queue.** Config validation enforces
+   `max_in_flight ≤ upstream_max_connections`. Each admitted request uses at
+   most one upstream connection at a time: retries are sequential, coalesced
+   followers use none, and health checks have their own client. So a free or
+   creatable connection always exists in the request's own synchronous call,
+   and the racy queued-wait path is never entered. Disabling admission control
+   (`max_in_flight: 0`) gives up this guarantee and logs a startup warning.
+3. **Detection:** `relay_upstream_pool_unstarted_connections` (scrape-time,
+   read-only introspection that falls back to −1 if httpcore's internals
+   change). If it stays above 0, slots are leaking.
+
+The regression test drives five overload spikes at 5× the limit and asserts
+full recovery with zero orphaned connections.
 
 ## Load balancing
 
@@ -218,8 +312,24 @@ Relay implements a conservative subset of HTTP caching, not RFC 9111:
 * Stored headers exclude hop-by-hop headers, `Date`, and `Age`. A hit adds
   `Age` and `X-Relay-Cache: HIT`.
 * **Not implemented:** `Expires`, revalidation (ETag / `If-None-Match`),
-  `stale-while-revalidate`, and request coalescing. Concurrent misses for one
-  key all go upstream (no protection against a "thundering herd").
+  `stale-while-revalidate`.
+
+### Request coalescing (single-flight)
+
+Without it, 50 concurrent misses for one hot key sent 50 identical requests
+upstream (measured during the audit): a cache stampede exactly when the cache
+is cold. `SingleFlight` keeps one in-flight fetch per cache key, and
+concurrent misses await its result (`X-Relay-Cache: COALESCED`).
+
+* The shared fetch runs in **its own task**, and waiters await it through
+  `asyncio.shield`. A leader whose client disconnects does not cancel the
+  fetch for everyone else, and the cache is still filled.
+* Errors propagate to every waiter. The entry is removed when the fetch
+  completes, so results are shared only between *concurrent* requests;
+  reuse over time is the cache's job.
+* The coalescing key is the cache key, so requests that the cache would
+  treat as different (another query, `Accept`, or a credentialed bypass) are
+  never merged. Can be switched off per route (`cache.coalesce: false`).
 
 ### Backends
 
@@ -284,6 +394,17 @@ Retry rules:
   breaker that opens takes the instance out of rotation. Backoff uses "full
   jitter": uniform in `[0, min(max, base·2^(n-1))]`, which de-synchronizes
   retries from many clients.
+* **Retry budget (aggregate bound).** `max_attempts` bounds retries *per
+  request*, not in total. The breaker needs *consecutive* failures, so an
+  upstream that fails every other request never trips it, and every failure
+  is retried: a brownout amplifies load exactly when the upstream is
+  struggling. Each route has a token budget. Every request deposits
+  `budget_ratio` (default 0.2) tokens, a reserve refills at
+  `budget_min_retries_per_second`, the balance is capped at
+  `budget_max_balance`, and each retry spends one token. Long run: retries ≤
+  20% of requests. The trade-off: once the budget is spent, some requests
+  that a retry would have rescued fail instead. The brownout benchmark
+  measures both sides.
 * When retries run out on an upstream status (say 503), the upstream's own
   response is returned. When they run out on a transport failure, Relay
   returns its JSON error (502/504).
@@ -309,7 +430,8 @@ with no `await` in the critical section, so no locks are needed. The
 trade-offs:
 
 * **One CPU core.** The gateway is CPU-bound on a single core under load (see
-  the benchmark report). Running several Uvicorn workers would scale
+  the benchmark report). It scales out by running more instances: the
+  horizontal-scaling benchmark runs 1, 2, and 4 instances behind Docker DNS. Running several Uvicorn workers would scale
   throughput, but each worker would have its own LRU, breakers, health
   checker, and round-robin cursor. Redis-backed rate limits stay globally
   correct, since that state lives in Redis.

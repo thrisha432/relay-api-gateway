@@ -7,10 +7,12 @@ per request and keeps client-disconnect/cancellation semantics intact.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -169,25 +171,48 @@ class RequestLimitsMiddleware:
 
 
 class AdmissionMiddleware:
-    """Load shedding: cap proxied requests in flight; reject the rest fast.
+    """Admission control: at most ``limit`` proxied requests in flight, a short
+    bounded FIFO wait queue, then fast load shedding.
 
-    Outermost middleware on purpose. A rejected request must cost as little
-    as possible, otherwise under overload the CPU spent *rejecting* starves the
-    requests already admitted and goodput collapses. So rejection skips
-    routing, the request context, and the access log (a counter still records
-    it), and sends a small pre-encoded 503. Operational endpoints (/health,
-    /metrics, /__relay) are never shed, so probes keep working under overload.
+    Why a queue and not reject-only: clients that retry a 503 instantly (many
+    do; k6 does) would otherwise spin, and even cheap rejections then burn the
+    CPU the admitted requests need. Measured in v0.1: 100 closed-loop clients
+    against a limit of 64 drove goodput to ~117 req/s. A parked waiter costs no
+    CPU. The wait is short (``queue_timeout``) so overload can never turn into
+    the self-inflicted timeout cascade this class exists to prevent.
 
-    Atomic without a lock: the check-and-increment contains no await.
+    Shedding (immediate 503 ``overloaded`` + ``Retry-After: 1``) happens when
+    the queue is full or a waiter's time runs out. It is outermost and skips
+    routing, the request context, and the access log, so it stays cheap.
+    Operational endpoints are never queued or shed.
+
+    No cancellation is used for the queue timeout: each waiter's future is
+    resolved by exactly one of two synchronous callbacks, "slot granted"
+    (``_release``) or "wait expired" (``_expire``), whichever runs first. A
+    slot therefore cannot be granted to a waiter that has already given up,
+    which is the class of race that leaked upstream connections (AUDIT A16).
     """
 
     def __init__(
-        self, app: ASGIApp, limit: int, on_shed: Callable[[str], None] | None = None
+        self,
+        app: ASGIApp,
+        limit: int,
+        *,
+        max_queued: int = 0,
+        queue_timeout: float = 0.0,
+        on_shed: Callable[[str, str], None] | None = None,
     ) -> None:
         self.app = app
         self.limit = limit
+        self.max_queued = max_queued
+        self.queue_timeout = queue_timeout
         self.on_shed = on_shed
         self.in_flight = 0
+        self._waiters: deque[asyncio.Future[bool]] = deque()
+
+    @property
+    def queued(self) -> int:
+        return len(self._waiters)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
@@ -197,16 +222,50 @@ class AdmissionMiddleware:
         ):
             await self.app(scope, receive, send)
             return
-        if self.in_flight >= self.limit:
+        if self.in_flight < self.limit and not self._waiters:
+            self.in_flight += 1
+        elif not await self._wait_for_slot():
+            reason = "queue_full" if self.queued >= self.max_queued else "queue_timeout"
             if self.on_shed:
-                self.on_shed(scope["path"])
+                self.on_shed(scope["path"], reason)
             await _send_overloaded(send)
             return
-        self.in_flight += 1
         try:
             await self.app(scope, receive, send)
         finally:
-            self.in_flight -= 1
+            self._release()
+
+    async def _wait_for_slot(self) -> bool:
+        """Park until a slot is handed over (True) or the wait expires (False)."""
+        if len(self._waiters) >= self.max_queued or self.queue_timeout <= 0:
+            return False
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[bool] = loop.create_future()
+        self._waiters.append(waiter)
+        timer = loop.call_later(self.queue_timeout, self._expire, waiter)
+        try:
+            return await waiter
+        except asyncio.CancelledError:
+            # Our task was cancelled; if a slot was already handed to us, pass it on.
+            if waiter.done() and not waiter.cancelled() and waiter.result():
+                self._release()
+            raise
+        finally:
+            timer.cancel()
+
+    def _expire(self, waiter: asyncio.Future[bool]) -> None:
+        if not waiter.done():
+            waiter.set_result(False)
+            self._waiters.remove(waiter)
+
+    def _release(self) -> None:
+        """Hand the finished request's slot to the oldest live waiter, or free it."""
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(True)  # slot transferred; in_flight unchanged
+                return
+        self.in_flight -= 1
 
 
 async def _send_overloaded(send: Send) -> None:

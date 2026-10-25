@@ -78,8 +78,8 @@ class RelayMetrics:
         )
         self.load_shed_total = Counter(
             "relay_load_shed_total",
-            "Requests rejected immediately because max_in_flight was reached.",
-            ["route"],
+            "Requests shed with 503 overloaded, by reason (queue_full, queue_timeout).",
+            ["route", "reason"],
             registry=r,
         )
         self.event_loop_lag = Gauge(

@@ -47,6 +47,21 @@ REDIS_URL=redis://127.0.0.1:6390/15 .venv/bin/pytest --cov   # + real Redis
 | Metrics exist under normal/failure traffic; bounded labels | `integration/test_metrics.py` |
 | JSON 500 without leaking internals; logging format; CLI | `unit/test_observability.py` |
 
+## Beyond example-based tests (v1)
+
+| Technique | What it adds | Where |
+|---|---|---|
+| **Property-based (Hypothesis)** | Thousands of generated cases, shrunk to minimal counterexamples | `unit/test_properties.py` |
+| Stateful testing | The LRU is driven by random operation sequences and compared with an `OrderedDict` model after every step | `TestLRUStateful` |
+| **Differential testing** | The Lua token bucket (in Redis) and an independent Python reference agree on every step of random timelines, including clocks that jump backwards | `test_lua_bucket_matches_reference_model` |
+| Invariant testing | For *any* arrival pattern: admitted ≤ capacity + rate × elapsed | `test_limiter_never_admits_more_than_capacity_plus_refill` |
+| Model-checked routing | The router matches a brute-force longest-prefix reference; dot segments are rejected however encoded | `test_router_matches_reference_longest_prefix` |
+| **Mutation testing (mutmut)** | Measures whether tests *detect* wrong code, not just execute it | `docs/QUALITY.md` |
+| **Chaos / fault injection** | A TCP proxy that resets, black-holes, or truncates connections to Redis and upstreams, then heals them | `integration/test_chaos.py`, `tests/chaos_proxy.py` |
+| **Multi-process** | 3 real `python -m relay` processes share one Redis bucket; SIGTERM shutdown verified | `integration/test_lifecycle.py` |
+| **Adversarial security** | Raw-socket attacks against the real HTTP parser | `security/test_security.py`, SECURITY.md |
+| **Regression for benchmark-found bugs** | The pool leak (A16) and metastable overload (A17) are reproduced and guarded | `integration/test_pool_leak.py`, `integration/test_admission.py` |
+
 ## Outside pytest
 
 * `scripts/smoke_test.sh`: end-to-end checks against the Docker Compose stack.
@@ -56,5 +71,5 @@ REDIS_URL=redis://127.0.0.1:6390/15 .venv/bin/pytest --cov   # + real Redis
 ## Not covered (known gaps)
 
 * HTTP request smuggling / fuzzing of the HTTP parser (delegated to Uvicorn).
-* Multi-worker deployments.
+* Multi-worker (single-process, multiple Uvicorn workers) deployments. Multiple *instances* are tested.
 * Long-duration soak tests (memory growth over hours).

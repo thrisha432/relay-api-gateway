@@ -93,7 +93,7 @@ def experiments() -> dict[str, list[Cell]]:
         ],
         "openloop": [
             Cell("openloop", m, executor="open", rate=r)
-            for r in (200, 400, 600, 800, 1000, 1200, 1400, 1600, 2000)
+            for r in (500, 1000, 1500, 2000, 2500, 3000, 3500)
             for m in ("nginx", "relay-uncached", "relay-unlimited")
         ],
         "scaling": [Cell("scaling", "relay-pool", vus=60, instances=n) for n in (1, 2, 4)],
@@ -230,7 +230,7 @@ def wait_for_closed_breakers(timeout: float = 30.0) -> None:
     print("  WARNING: a circuit breaker stayed open; run may be affected", flush=True)
 
 
-def run_cell(cell: Cell, rep: int, duration: str, raw_dir: Path) -> dict:
+def run_cell(cell: Cell, rep: int, duration: str, raw_dir: Path, attempt: int = 1) -> dict:
     base, route, keys, container = MODES[cell.mode]
     wait_for_closed_breakers()
     out_name = f"{cell.name}-rep{rep}.json"
@@ -261,7 +261,21 @@ def run_cell(cell: Cell, rep: int, duration: str, raw_dir: Path) -> dict:
     if cell.brownout:
         mock("b", "/__mock/reset", {})
 
-    metrics = json.loads((raw_dir / out_name).read_text())["metrics"]
+    summary = json.loads((raw_dir / out_name).read_text())
+    planned_ms = _seconds(duration) * 1000
+    actual_ms = summary["state"]["testRunDurationMs"]
+    if actual_ms > planned_ms * 1.5:
+        # The run was paused (e.g. the host slept, freezing the Docker VM) or
+        # badly stalled: its numbers would be meaningless. Discard and redo it.
+        (raw_dir / out_name).rename(raw_dir / f"{out_name}.invalid-{int(actual_ms)}ms")
+        print(
+            f"  WARNING: {cell.name} rep{rep} ran {actual_ms / 1000:.0f}s for a {duration} test; discarded, re-running",
+            flush=True,
+        )
+        if attempt >= 3:
+            raise SystemExit(f"{cell.name}: 3 stretched runs in a row; is the machine sleeping?")
+        return run_cell(cell, rep, duration, raw_dir, attempt + 1)
+    metrics = summary["metrics"]
     dur = metrics["http_req_duration"]["values"]
     reqs = metrics["http_reqs"]["values"]
     dropped = metrics.get("dropped_iterations", {}).get("values", {}).get("count", 0)
@@ -290,6 +304,10 @@ def run_cell(cell: Cell, rep: int, duration: str, raw_dir: Path) -> dict:
         flush=True,
     )
     return row
+
+
+def _seconds(duration: str) -> float:
+    return float(duration.rstrip("s"))
 
 
 def set_pool_size(n: int) -> None:
@@ -360,9 +378,15 @@ def main() -> None:
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--duration", default="20s")
     parser.add_argument("--out", help="output directory (default: results/<timestamp>-matrix)")
+    parser.add_argument("--match", nargs="*", help="only cells whose name contains one of these")
     args = parser.parse_args()
 
     selected = {k: v for k, v in experiments().items() if not args.only or k in args.only}
+    if args.match:
+        selected = {
+            k: [c for c in v if any(m in c.name for m in args.match)] for k, v in selected.items()
+        }
+        selected = {k: v for k, v in selected.items() if v}
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out = (ROOT / args.out).resolve() if args.out else RESULTS / f"{stamp}-matrix"
     raw_dir = out / "raw"

@@ -25,7 +25,8 @@ async def test_requests_beyond_the_limit_are_shed_immediately(upstream_a) -> Non
     shed = [r for r in responses if r.status_code == 503]
     assert {r.json()["error"]["code"] for r in shed} == {"overloaded"}
     assert {r.headers["retry-after"] for r in shed} == {"1"}
-    assert 'relay_load_shed_total{route="catalog"} 15.0' in metrics
+    # 300 ms upstream > 100 ms queue timeout: the 15 extra requests wait, then are shed.
+    assert 'relay_load_shed_total{reason="queue_timeout",route="catalog"} 15.0' in metrics
     assert (await upstream_a.stats())["requests"] == {"GET": 5}
 
 
@@ -64,3 +65,71 @@ async def test_event_loop_lag_is_exported(upstream_a) -> None:
         metrics = (await client.get("/metrics")).text
     line = next(ln for ln in metrics.splitlines() if ln.startswith("relay_event_loop_lag_seconds "))
     assert 0 <= float(line.split()[1]) < 0.5
+
+
+async def test_queued_requests_are_served_when_a_slot_frees(upstream_a) -> None:
+    """Short bursts above the limit wait briefly instead of failing."""
+    config = build_config(
+        [upstream_a.url],
+        server={"max_in_flight": 2, "admission_queue_timeout_seconds": 1.0},
+    )
+    async with gateway_client(config) as client:
+        responses = await asyncio.gather(
+            *(client.get("/api/catalog/x?delay_ms=50") for _ in range(10))
+        )
+    assert {r.status_code for r in responses} == {200}
+    assert (await upstream_a.stats())["requests"] == {"GET": 10}
+
+
+async def test_full_queue_sheds_immediately(upstream_a) -> None:
+    config = build_config(
+        [upstream_a.url],
+        server={
+            "max_in_flight": 1,
+            "admission_max_queued": 2,
+            "admission_queue_timeout_seconds": 2.0,
+        },
+    )
+    async with gateway_client(config) as client:
+        loop = asyncio.get_running_loop()
+        tasks = [asyncio.create_task(client.get("/api/catalog/x?delay_ms=300")) for _ in range(3)]
+        await asyncio.sleep(0.05)  # 1 in flight + 2 queued: the queue is full
+        start = loop.time()
+        shed = await client.get("/api/catalog/x")
+        shed_after = loop.time() - start
+        served = await asyncio.gather(*tasks)
+        metrics = (await client.get("/metrics")).text
+    assert shed.status_code == 503
+    assert shed_after < 0.1  # not parked: rejected at once
+    assert [r.status_code for r in served] == [200, 200, 200]
+    assert 'reason="queue_full"' in metrics
+
+
+async def test_cancelled_waiter_does_not_leak_a_slot(upstream_a) -> None:
+    config = build_config(
+        [upstream_a.url],
+        server={"max_in_flight": 1, "admission_queue_timeout_seconds": 5.0},
+    )
+    async with gateway_client(config) as client:
+        holder = asyncio.create_task(client.get("/api/catalog/x?delay_ms=200"))
+        await asyncio.sleep(0.05)
+        waiter = asyncio.create_task(client.get("/api/catalog/x"))
+        await asyncio.sleep(0.05)
+        waiter.cancel()  # client gives up while queued
+        await asyncio.gather(waiter, return_exceptions=True)
+        assert (await holder).status_code == 200
+        # The single slot must be free again: sequential requests all succeed.
+        after = [(await client.get("/api/catalog/x")).status_code for _ in range(3)]
+        admission = next(
+            m for m in _middlewares(client.app) if type(m).__name__ == "AdmissionMiddleware"
+        )
+    assert after == [200, 200, 200]
+    assert admission.in_flight == 0
+    assert admission.queued == 0
+
+
+def _middlewares(app):
+    node = app.middleware_stack
+    while node is not None:
+        yield node
+        node = getattr(node, "app", None)

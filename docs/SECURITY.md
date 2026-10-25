@@ -13,7 +13,7 @@ public edge proxy.
 | Path traversal | Dot segments rejected, including encoded forms (`%2e%2e`, `..%2F`); NUL bytes, backslashes and non-ASCII rejected; raw-path matching only on segment boundaries. | `routing.validate_raw_path` |
 | Hop-by-hop / smuggling-adjacent headers | RFC 9110 hop-by-hop set and every `Connection`-named header stripped in both directions; `Content-Length` recomputed; `Transfer-Encoding` never forwarded. | `headers.py` |
 | Spoofed client IPs | `X-Forwarded-For` ignored unless the peer is in `server.trusted_proxies`; then the right-most untrusted hop is used. | `client_identity.py` |
-| Resource exhaustion | Request body cap (413, enforced while streaming); response body cap; bounded timeouts (connect/attempt/request); at most 5 attempts; bounded connection pools; one health task per route; bounded LRU. | `proxy.py`, `config.py` |
+| Resource exhaustion | Admission control: at most `max_in_flight` proxied requests, the rest get a cheap 503 `overloaded`; header size/count caps (431); request body cap (413, enforced while streaming); response body cap; bounded timeouts (connect/attempt/request); at most 5 attempts; bounded connection pools; one health task per route; bounded LRU. | `proxy.py`, `config.py` |
 | Abuse | Per-client token bucket; **fail-closed** by default if Redis is down. | `rate_limiter.py` |
 | Duplicate writes | POST/PUT/PATCH/DELETE never retried (config rejects them in `retry_methods`). | `resilience/retry.py`, `config.py` |
 | Cache poisoning / data leaks | Credentialed requests (`Authorization`, `Cookie`) bypass the cache; `Set-Cookie`, `private`, `no-store`, `no-cache`, unexpected `Vary` → never stored; `X-Relay-Cache` cannot be spoofed by upstreams. | `cache/response_cache.py` |
@@ -23,6 +23,35 @@ public edge proxy.
 | Secrets in the repo | None needed. `.env` is git-ignored; `.env.example` holds placeholders; CI runs gitleaks. | `.gitignore`, CI |
 | Container | Non-root user (uid 10001); pinned base image and dependencies. | `Dockerfile` |
 | Local exposure | Every Compose port is bound to `127.0.0.1`; Redis has no published port. | `compose.yaml` |
+
+## Adversarial test suite
+
+`tests/security/test_security.py` writes **raw bytes over real sockets** to a
+Uvicorn-served gateway, so the real HTTP parser is in the loop and no client
+library normalizes the input first. It tries to *break* each guarantee:
+
+* **SSRF:** absolute-form targets to an external host, the cloud metadata
+  address (`169.254.169.254`), and an internal Redis; `Host`,
+  `X-Forwarded-Host`, `X-Original-URL`, `X-Rewrite-URL`, and `Forwarded`
+  overrides; `?url=` and `?upstream=` parameters. All still reach only the
+  configured upstream.
+* **Escaping the route:** `//evil`, `%2e%2e`, `..%2F`, `%5C`, `%00`, `@`, and
+  an encoded slash hiding a dot segment. All rejected (400/404) and never
+  forwarded.
+* **Redirects:** an upstream 302 to an internal address is returned to the
+  client, never followed.
+* **Framing:** conflicting `Content-Length` + `Transfer-Encoding` with a
+  smuggled second request, rejected before anything reaches the upstream;
+  oversized and too-many headers (431); missing `Host` (400).
+* **Spoofing:** an upstream cannot spoof `X-Relay-Cache` or `X-Request-ID`
+  or inject `Connection`-listed headers.
+* **Leakage:** a Redis password in the URL never appears in responses,
+  readiness output, the route summary, metrics, or logs. Errors contain no
+  exception text, upstream addresses, or tracebacks. Access logs contain no
+  query strings, credentials, cookies, or client IPs.
+
+Static analysis: Ruff's `S` (flake8-bandit) rules run on every lint, and
+`pip-audit` scans the locked dependencies in CI.
 
 ## Known limitations (read before reusing this code)
 

@@ -92,6 +92,12 @@ class ServerConfig(_Strict):
     # reproduced in benchmarks/: open-loop sweep). Size it near
     # throughput x acceptable queueing delay. 0 disables the limit.
     max_in_flight: int = Field(default=64, ge=0, le=100_000)
+    # Requests over the limit wait (FIFO, costing no CPU) up to
+    # admission_queue_timeout_seconds for a slot; a full queue or an expired
+    # wait gets 503 "overloaded". Keep the timeout far below the attempt
+    # timeout so queueing can never cause upstream timeouts.
+    admission_max_queued: int = Field(default=256, ge=0, le=100_000)
+    admission_queue_timeout_seconds: float = Field(default=0.1, ge=0, le=5)
     upstream_max_connections: int = Field(default=100, ge=1, le=10_000)
     upstream_max_keepalive_connections: int = Field(default=20, ge=0, le=10_000)
 

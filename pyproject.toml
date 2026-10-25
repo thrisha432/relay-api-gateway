@@ -70,6 +70,7 @@ ignore = [
 "scripts/bench_matrix.py" = ["E501", "S310"]  # fixed localhost URLs only
 "scripts/chaos_timeline.py" = ["E501", "S310", "S607"]  # runs docker from PATH
 "scripts/plot_benchmarks.py" = ["E501"]
+"scripts/ab_compare.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

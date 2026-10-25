@@ -19,10 +19,10 @@ runtime configuration.
 | Header | When |
 |---|---|
 | `X-Request-ID` | Always. An incoming value matching `[A-Za-z0-9._:-]{1,128}` is reused; otherwise Relay generates one. It is also forwarded upstream. |
-| `X-Relay-Cache: HIT \| MISS \| BYPASS` | Routes with caching enabled. An upstream cannot spoof this header (it is stripped from upstream responses). |
+| `X-Relay-Cache: HIT \| MISS \| COALESCED \| BYPASS` | Routes with caching enabled. `COALESCED` = a miss answered by joining an identical in-flight upstream request. An upstream cannot spoof this header (it is stripped from upstream responses). |
 | `Age` | Cache hits. |
 | `X-RateLimit-Limit`, `X-RateLimit-Remaining` | Rate-limited routes, on allowed and on 429 responses. |
-| `Retry-After` | 429 responses (whole seconds until a token is available). |
+| `Retry-After` | 429 responses (whole seconds until a token is available) and 503 `overloaded` (always `1`). |
 
 ### Headers sent upstream
 
@@ -54,7 +54,9 @@ pass through untouched):
 | 400 | `invalid_request` | Non-ASCII path, dot segments (including encoded ones), forbidden characters, or a non-numeric `Content-Length`. |
 | 404 | `route_not_found` | No configured prefix matches. |
 | 405 | `method_not_allowed` | TRACE, CONNECT, or a non-standard method. |
+| 400 | `invalid_request` | HTTP/1.1 request without a `Host` header. |
 | 413 | `payload_too_large` | Body larger than `server.max_request_body_bytes` (checked against `Content-Length` and while streaming). |
+| 431 | `request_headers_too_large` | Headers exceed `server.max_header_bytes` or `server.max_header_count`. |
 | 429 | `rate_limited` | Token bucket empty; see `Retry-After`. |
 | 500 | `internal_error` | Unexpected gateway bug. The details are only in the logs. |
 | 502 | `upstream_connection_error` | Could not connect to the upstream (after allowed retries). |
@@ -63,6 +65,7 @@ pass through untouched):
 | 503 | `upstream_unavailable` | No healthy upstream for the route. |
 | 503 | `circuit_open` | Every healthy upstream's circuit breaker is rejecting calls. |
 | 503 | `rate_limiter_unavailable` | Redis unreachable and the policy is fail-closed. |
+| 503 | `overloaded` | `server.max_in_flight` proxied requests already in progress (load shed, with `Retry-After: 1`). Never returned for `/health`, `/metrics`, or `/__relay`. |
 | 504 | `upstream_timeout` | The attempt or request deadline expired. |
 
 Every error response carries `Cache-Control: no-store`.
@@ -91,6 +94,8 @@ Unknown keys are errors, so a typo can never silently do nothing.
 | `RELAY_REDIS_URL` | Overrides `redis.url`. Put credentials here, never in YAML. |
 | `RELAY_LOG_LEVEL` | `DEBUG`, `INFO` (default), `WARNING`, ... |
 | `RELAY_LOG_JSON` | `true` (default) for JSON lines; `false` for human-readable text. |
+| `RELAY_MAX_IN_FLIGHT` | Overrides `server.max_in_flight` (`0` disables admission control). |
+| `RELAY_ACCESS_LOG` | Overrides `server.access_log` (benchmarks use it for the ablation). |
 
 ### `server`
 
@@ -102,6 +107,9 @@ Unknown keys are errors, so a typo can never silently do nothing.
 | `trusted_proxies` | `[]` | CIDRs whose `X-Forwarded-For` is honored. |
 | `enable_route_summary` | `true` | Exposes `/__relay/routes`. |
 | `shutdown_grace_seconds` | 5 | Uvicorn graceful shutdown time. |
+| `max_header_bytes` / `max_header_count` | 32 KiB / 100 | 431 above either. |
+| `max_in_flight` | 64 | Admission control; `0` disables it (startup warning). Must be ≤ `upstream_max_connections` (validated; see ARCHITECTURE.md, "Upstream connection pool"). |
+| `access_log` | `true` | One JSON line per request. |
 | `upstream_max_connections` / `upstream_max_keepalive_connections` | 100 / 20 | Shared upstream connection pool. |
 
 ### `redis`
@@ -134,6 +142,10 @@ still inherits every other retry setting from `defaults`.
 | `retries.retry_status_codes` | `[502, 503, 504]` | 5xx only |
 | `retries.retry_methods` | `[GET, HEAD, OPTIONS]` | Only these three are accepted |
 | `retries.backoff_base_seconds` / `backoff_max_seconds` | 0.05 / 0.5 | base ≤ max |
+| `retries.budget_enabled` | `true` | Retry budget on/off |
+| `retries.budget_ratio` | 0.2 | Tokens deposited per request (≈ max fraction of extra load from retries) |
+| `retries.budget_min_retries_per_second` | 5 | Reserve for low-traffic routes |
+| `retries.budget_max_balance` | 50 | Cap on banked retries |
 | `health_check.enabled` | `true` | |
 | `health_check.path` | `/health` | |
 | `health_check.interval_seconds` / `timeout_seconds` | 5.0 / 1.0 | |
@@ -154,7 +166,7 @@ still inherits every other retry setting from `defaults`.
 | `strip_prefix` | no (`false`) | Remove the prefix before forwarding |
 | `upstreams[]` | yes (1–64) | `{id, url}`; ids unique per route; the URL must be http(s), with no credentials, query, or fragment |
 | `rate_limit` | no | `{capacity ≥ 1, refill_rate_per_second > 0, key_ttl_seconds?}` |
-| `cache` | no (disabled) | `{enabled, ttl_seconds, max_entry_bytes, allowed_status_codes, vary_headers}` (`authorization` and `cookie` cannot be vary headers) |
+| `cache` | no (disabled) | `{enabled, ttl_seconds, max_entry_bytes, allowed_status_codes, vary_headers, coalesce}` (`coalesce` default `true`) (`authorization` and `cookie` cannot be vary headers) |
 | `retries`, `timeouts`, `health_check`, `circuit_breaker` | no | Per-field overrides of `defaults` |
 
 ### Differences from the illustrative schema in PROJECT_SPEC.md §7

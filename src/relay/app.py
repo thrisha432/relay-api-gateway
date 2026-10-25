@@ -84,9 +84,9 @@ def create_app(
         max_header_count=config.server.max_header_count,
     )
 
-    def on_shed(path: str) -> None:
+    def on_shed(path: str, reason: str) -> None:
         match = gateway.router.match(path)
-        metrics.load_shed_total.labels(match.route.id if match else UNMATCHED_ROUTE).inc()
+        metrics.load_shed_total.labels(match.route.id if match else UNMATCHED_ROUTE, reason).inc()
 
     app.add_middleware(
         RequestContextMiddleware,
@@ -96,7 +96,13 @@ def create_app(
         access_log=config.server.access_log,
     )
     # Outermost: shed overload before any per-request work (see AdmissionMiddleware).
-    app.add_middleware(AdmissionMiddleware, limit=config.server.max_in_flight, on_shed=on_shed)
+    app.add_middleware(
+        AdmissionMiddleware,
+        limit=config.server.max_in_flight,
+        max_queued=config.server.admission_max_queued,
+        queue_timeout=config.server.admission_queue_timeout_seconds,
+        on_shed=on_shed,
+    )
 
     def _ops(request: Request) -> None:
         request.scope["state"]["relay"].route_id = OPERATIONAL_ROUTE

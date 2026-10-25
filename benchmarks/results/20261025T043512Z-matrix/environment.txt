@@ -1,9 +1,0 @@
-timestamp_utc: 2026-10-25T04:35:36+00:00
-git_commit: 2234e47
-machine: Apple M4 Pro, 12 cores
-os: macOS 15.7.7
-docker: 29.4.0, VM 12 CPUs 8321429504 bytes
-relay python: Python 3.12.15
-relay: 1 uvicorn worker (uvloop, httptools) per instance; access log on unless *-nolog
-nginx: 1.27.5, worker_processes 1, upstream keepalive 64, access_log off
-k6: grafana/k6:1.1.0 in the same Docker network; mock backend: 1 uvicorn worker
