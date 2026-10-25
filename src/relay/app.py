@@ -71,8 +71,18 @@ def create_app(
 
     @app.get("/health/ready")
     async def ready(request: Request) -> Response:
+        """Readiness policy: the first health-check round has finished and every
+        route has at least one healthy upstream."""
         _ops(request)
-        return JSONResponse({"status": "ready"})
+        report = gateway.readiness()
+        return JSONResponse(report, status_code=200 if report["status"] == "ready" else 503)
+
+    if config.server.enable_route_summary:
+
+        @app.get("/__relay/routes")
+        async def routes(request: Request) -> dict[str, object]:
+            _ops(request)
+            return {"routes": gateway.route_summary()}
 
     # Mounted as a raw ASGI app (not a function endpoint) so Starlette passes
     # every method through; the gateway answers 405 itself using the JSON

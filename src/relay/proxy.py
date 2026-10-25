@@ -3,8 +3,9 @@
 Pipeline order (see docs/ARCHITECTURE.md):
  1. Validate path/method and enforce the request body limit.
  2. Match a configured route (404 otherwise).
- 3. Forward to the route's upstream with explicit timeouts.
- 4. Return the response with hop-by-hop headers removed.
+ 3. Pick a healthy upstream (round-robin over instances that pass health checks).
+ 4. Forward with explicit timeouts.
+ 5. Return the response with hop-by-hop headers removed.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from relay.config import RelayConfig, RouteConfig, UpstreamConfig
 from relay.errors import (
     INVALID_REQUEST,
     METHOD_NOT_ALLOWED,
+    NO_HEALTHY_UPSTREAM,
     PAYLOAD_TOO_LARGE,
     ROUTE_NOT_FOUND,
     UPSTREAM_BAD_RESPONSE,
@@ -38,6 +40,8 @@ from relay.headers import (
     get_all,
     get_header,
 )
+from relay.health import HealthChecker, HealthRegistry
+from relay.load_balancer import RoundRobinBalancer
 from relay.logging_config import get_logger
 from relay.models import RequestContext, UpstreamResponse
 from relay.routing import InvalidPathError, Router, validate_raw_path
@@ -78,6 +82,9 @@ class Gateway:
         self.config = config
         self.router = Router(config.routes)
         self.identity = ClientIdentityResolver(config.server.trusted_proxies)
+        self.health = HealthRegistry(config.routes)
+        self.health_checker = HealthChecker(config.routes, self.health)
+        self.balancers = {r.id: RoundRobinBalancer(r.upstreams) for r in config.routes}
         self._client = http_client
         self._owns_client = http_client is None
 
@@ -97,11 +104,44 @@ class Gateway:
                 follow_redirects=False,
                 trust_env=False,
             )
+        await self.health_checker.start()
 
     async def close(self) -> None:
+        await self.health_checker.stop()
         if self._client is not None and self._owns_client:
             await self._client.aclose()
         self._client = None
+
+    # ------------------------------------------------------------- operations
+
+    def readiness(self) -> dict[str, object]:
+        checks: dict[str, object] = {
+            "health_checks_started": self.health_checker.first_round_complete()
+        }
+        routes_ok = {
+            r.id: any(self.health.is_healthy(r.id, u.id) for u in r.upstreams)
+            for r in self.config.routes
+        }
+        checks["routes_with_healthy_upstream"] = routes_ok
+        ready = bool(checks["health_checks_started"]) and all(routes_ok.values())
+        return {"status": "ready" if ready else "not_ready", "checks": checks}
+
+    def route_summary(self) -> list[dict[str, object]]:
+        """Route table for local debugging. Upstream URLs are deliberately omitted."""
+        return [
+            {
+                "id": r.id,
+                "path_prefix": r.path_prefix,
+                "strip_prefix": r.strip_prefix,
+                "upstreams": [
+                    {"id": u.id, "healthy": self.health.is_healthy(r.id, u.id)} for u in r.upstreams
+                ],
+                "rate_limited": r.rate_limit is not None,
+                "cache_enabled": r.cache.enabled,
+                "max_attempts": r.retries.max_attempts,
+            }
+            for r in self.config.routes
+        ]
 
     # ------------------------------------------------------------------ pipeline
 
@@ -129,7 +169,12 @@ class Gateway:
         query = request.scope.get("query_string", b"").decode("latin-1")
         headers = self._upstream_headers(request, ctx)
 
-        upstream = route.upstreams[0]
+        candidates = self.balancers[route.id].candidates(
+            lambda u: self.health.is_healthy(route.id, u.id)
+        )
+        if not candidates:
+            raise GatewayError(NO_HEALTHY_UPSTREAM)
+        upstream = candidates[0]
         ctx.upstream_id = upstream.id
         ctx.attempts = 1
         try:

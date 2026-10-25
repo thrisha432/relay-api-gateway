@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import socket
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -110,3 +111,12 @@ async def gateway_client(
         async with httpx.AsyncClient(transport=transport, base_url="http://relay.test") as client:
             client.app = app  # type: ignore[attr-defined]
             yield client
+
+
+async def wait_for(predicate: Any, within_seconds: float = 3.0) -> None:
+    """Poll ``predicate`` until true; fail the test if it takes too long."""
+    deadline = time.monotonic() + within_seconds
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not reached in time")
+        await asyncio.sleep(0.02)
