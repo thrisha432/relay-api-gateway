@@ -49,6 +49,7 @@ from relay.errors import (
     INVALID_REQUEST,
     METHOD_NOT_ALLOWED,
     NO_HEALTHY_UPSTREAM,
+    OVERLOADED,
     PAYLOAD_TOO_LARGE,
     RATE_LIMITED,
     RATE_LIMITER_UNAVAILABLE,
@@ -182,6 +183,8 @@ class Gateway:
         self._owns_redis = redis is None
         self.rate_limiter: RedisRateLimiter | None = None
         self._last_fail_open_log = float("-inf")
+        self._in_flight = 0
+        self._lag_task: asyncio.Task[None] | None = None
 
         self.health.add_listener(self._observe_health_change)
         for route in config.routes:
@@ -229,9 +232,14 @@ class Gateway:
                 on_error=lambda op: self.metrics.redis_errors_total.labels(op).inc(),
             )
         await self.health_checker.start()
+        self._lag_task = asyncio.create_task(self._watch_loop_lag(), name="relay-loop-lag")
 
     async def close(self) -> None:
         """Release everything start() created. Safe to call more than once."""
+        if self._lag_task is not None:
+            self._lag_task.cancel()
+            await asyncio.gather(self._lag_task, return_exceptions=True)
+            self._lag_task = None
         await self.health_checker.stop()
         if self.cache is not None:
             await self.cache.close()
@@ -299,6 +307,19 @@ class Gateway:
 
     async def _handle(self, request: Request, ctx: RequestContext) -> Response:
         match = self._match(request, ctx)
+        limit = self.config.server.max_in_flight
+        if limit and self._in_flight >= limit:
+            # Shed before doing any work: cheap, immediate, and it keeps the
+            # event loop responsive for the requests already admitted.
+            self.metrics.load_shed_total.labels(match.route.id).inc()
+            raise GatewayError(OVERLOADED, headers={"retry-after": "1"})
+        self._in_flight += 1
+        try:
+            return await self._admitted(request, ctx, match)
+        finally:
+            self._in_flight -= 1
+
+    async def _admitted(self, request: Request, ctx: RequestContext, match: RouteMatch) -> Response:
         decision = None
         if match.route.rate_limit is not None:
             decision = await self._enforce_rate_limit(request, match.route, ctx)
@@ -579,34 +600,49 @@ class Gateway:
         """Send one request with bounded time and response size; no retries here."""
         timeouts = preq.route.timeouts
         url = f"{upstream.url}{preq.upstream_path}" + (f"?{preq.query}" if preq.query else "")
+        # Every phase gets httpx's own timeout (pool wait, connect, each read and
+        # write), and the whole-attempt budget is checked cooperatively after
+        # the headers and between body chunks.
+        #
+        # Deliberately NOT asyncio.timeout around client.send(): cancelling
+        # httpcore from outside can orphan a pooled connection in CONNECTING
+        # state (a connection assigned to a waiting request that is cancelled
+        # before it dials is never reclaimed). Under overload that leaked every
+        # pool slot and turned a load spike into a permanent outage; see
+        # tests/integration/test_pool_leak.py and docs/AUDIT.md (A16).
         request = self.client.build_request(
             preq.method,
             url,
             headers=preq.upstream_headers,
             content=preq.body or None,
-            timeout=httpx.Timeout(budget, connect=min(timeouts.connect_seconds, budget)),
+            timeout=httpx.Timeout(
+                budget, connect=min(timeouts.connect_seconds, budget), pool=budget
+            ),
         )
         limit = self.config.server.max_response_body_bytes
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         try:
-            # asyncio.timeout bounds the whole attempt (connect + headers + body);
-            # httpx's own timeouts bound each individual socket operation.
-            async with asyncio.timeout(budget):
-                response = await self.client.send(request, stream=True)
-                try:
-                    declared = response.headers.get("content-length")
-                    if declared and declared.isdigit() and int(declared) > limit:
+            response = await self.client.send(request, stream=True)
+            try:
+                if loop.time() - started > budget:
+                    raise UpstreamFailure(FailureKind.TIMEOUT)
+                declared = response.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > limit:
+                    raise UpstreamFailure(FailureKind.TOO_LARGE)
+                chunks: list[bytes] = []
+                total = 0
+                # aiter_raw: pass bytes through untouched (no gzip decoding),
+                # so Content-Encoding stays valid for the client.
+                async for chunk in response.aiter_raw():
+                    total += len(chunk)
+                    if total > limit:
                         raise UpstreamFailure(FailureKind.TOO_LARGE)
-                    chunks: list[bytes] = []
-                    total = 0
-                    # aiter_raw: pass bytes through untouched (no gzip decoding),
-                    # so Content-Encoding stays valid for the client.
-                    async for chunk in response.aiter_raw():
-                        total += len(chunk)
-                        if total > limit:
-                            raise UpstreamFailure(FailureKind.TOO_LARGE)
-                        chunks.append(chunk)
-                finally:
-                    await response.aclose()
+                    if loop.time() - started > budget:
+                        raise UpstreamFailure(FailureKind.TIMEOUT)
+                    chunks.append(chunk)
+            finally:
+                await response.aclose()
         except UpstreamFailure:
             raise
         except (TimeoutError, httpx.TimeoutException):
@@ -668,6 +704,23 @@ class Gateway:
         return headers
 
     # ------------------------------------------------------------ observers
+
+    async def _watch_loop_lag(self, interval: float = 0.1) -> None:
+        """Measure event-loop lag: how late a short sleep wakes up.
+
+        The worst lag seen in each one-second window is exported, so CPU
+        saturation of the gateway itself is visible separately from upstream
+        latency.
+        """
+        loop = asyncio.get_running_loop()
+        worst, window_start = 0.0, loop.time()
+        while True:
+            before = loop.time()
+            await asyncio.sleep(interval)
+            worst = max(worst, loop.time() - before - interval)
+            if loop.time() - window_start >= 1.0:
+                self.metrics.event_loop_lag.set(worst)
+                worst, window_start = 0.0, loop.time()
 
     def _observe_probe(self, route_id: str, upstream_id: str, ok: bool) -> None:
         result = "success" if ok else "failure"

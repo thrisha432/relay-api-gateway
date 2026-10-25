@@ -293,6 +293,22 @@ def build() -> dict:
             44,
         ),
         series(
+            "Gateway saturation: event-loop lag",
+            [("max(relay_event_loop_lag_seconds)", "worst timer lateness")],
+            0,
+            52,
+            unit="s",
+            description="How late a 100 ms timer fires. High values mean Relay itself is CPU-bound, so latency is not the upstream's fault.",
+        ),
+        series(
+            "Load shed (503 overloaded)",
+            [(f"sum by (route) (rate(relay_load_shed_total{{{R}}}[{RI}]))", "{{route}}")],
+            12,
+            52,
+            unit="ops",
+            description="Requests rejected immediately because max_in_flight was reached.",
+        ),
+        series(
             "Health-check probe failures",
             [
                 (

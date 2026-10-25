@@ -84,6 +84,14 @@ class ServerConfig(_Strict):
     # Upstream connection pool (shared by all routes). httpcore scans the pool
     # on every request, so idle connections beyond what concurrency needs cost
     # CPU; see docs/ARCHITECTURE.md "Performance notes".
+    # Admission control: proxied requests in flight at once. Above this Relay
+    # sheds load with an immediate 503 "overloaded" instead of queueing work
+    # until it times out. Without it, overload makes requests time out inside
+    # the gateway, the circuit breaker blames the (healthy) upstream, and the
+    # system stays down even after load drops (a metastable failure,
+    # reproduced in benchmarks/: open-loop sweep). Size it near
+    # throughput x acceptable queueing delay. 0 disables the limit.
+    max_in_flight: int = Field(default=128, ge=0, le=100_000)
     upstream_max_connections: int = Field(default=100, ge=1, le=10_000)
     upstream_max_keepalive_connections: int = Field(default=20, ge=0, le=10_000)
 

@@ -76,6 +76,18 @@ class RelayMetrics:
         self.in_flight = Gauge(
             "relay_in_flight_requests", "Requests currently being processed.", registry=r
         )
+        self.load_shed_total = Counter(
+            "relay_load_shed_total",
+            "Requests rejected immediately because max_in_flight was reached.",
+            ["route"],
+            registry=r,
+        )
+        self.event_loop_lag = Gauge(
+            "relay_event_loop_lag_seconds",
+            "How late a 100 ms timer fired on the event loop (max over the last interval). "
+            "High values mean the gateway itself is CPU-saturated.",
+            registry=r,
+        )
         self.upstream_requests_total = Counter(
             "relay_upstream_requests_total",
             "Upstream attempts by outcome (status class or failure kind).",

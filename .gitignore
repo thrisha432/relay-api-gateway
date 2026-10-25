@@ -34,3 +34,6 @@ benchmarks/results/tmp/
 
 # mutation testing workspace
 mutants/
+
+# local verification logs (scripts/verify.sh)
+verification/

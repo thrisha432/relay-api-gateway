@@ -213,8 +213,25 @@ def _mib(value: str) -> float:
 # --------------------------------------------------------------------- run
 
 
+def wait_for_closed_breakers(timeout: float = 30.0) -> None:
+    """Isolation between cells: never start a run while a previous run left a
+    breaker open on the (host-reachable) main gateway."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8080/__relay/routes", timeout=2) as resp:
+                routes = json.load(resp)["routes"]
+            if all(u["circuit"] == "closed" for r in routes for u in r["upstreams"]):
+                return
+        except OSError:
+            pass
+        time.sleep(1)
+    print("  WARNING: a circuit breaker stayed open; run may be affected", flush=True)
+
+
 def run_cell(cell: Cell, rep: int, duration: str, raw_dir: Path) -> dict:
     base, route, keys, container = MODES[cell.mode]
+    wait_for_closed_breakers()
     out_name = f"{cell.name}-rep{rep}.json"
     for b in BACKENDS:
         mock(b, "/__mock/reset", {})
@@ -352,7 +369,26 @@ def main() -> None:
 
     print("starting stack ...", flush=True)
     compose("up", "-d", "--build", "--scale", "relay-pool=1")
+    # NGINX resolves upstream hostnames once at startup; if `up` recreated the
+    # backends (new IPs), it would keep dialing the old address. Restart it so
+    # it resolves the current ones. (Relay/httpx resolves per new connection.)
+    compose("restart", "nginx")
     time.sleep(10)
+    for path in ("/api/bench/items?key=check",):
+        out_check = compose(
+            "run",
+            "--rm",
+            "--entrypoint",
+            "wget",
+            "k6",
+            "-q",
+            "-O",
+            "-",
+            f"http://nginx:8080{path}",
+            check=False,
+        )
+        if "backend-a" not in out_check:
+            raise SystemExit(f"NGINX baseline is not proxying correctly: {out_check[:200]!r}")
     (out / "environment.txt").write_text(environment())
 
     rows: list[dict] = []

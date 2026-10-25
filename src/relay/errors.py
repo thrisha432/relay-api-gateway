@@ -48,6 +48,7 @@ RATE_LIMITER_UNAVAILABLE = ErrorSpec(
     503, "rate_limiter_unavailable", "Rate limiting is temporarily unavailable."
 )
 UPSTREAM_TIMEOUT = ErrorSpec(504, "upstream_timeout", "The upstream service timed out.")
+OVERLOADED = ErrorSpec(503, "overloaded", "The gateway is at capacity. Retry shortly.")
 INTERNAL_ERROR = ErrorSpec(500, "internal_error", "An internal gateway error occurred.")
 
 
