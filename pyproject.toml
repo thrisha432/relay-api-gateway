@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relay-gateway"
+version = "0.1.0"
+description = "Relay: a portfolio-grade asynchronous HTTP API gateway (not production-certified)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+# Compatible ranges here; exact resolved versions live in requirements*.lock.
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+    "httpx>=0.28,<0.29",
+    "redis>=5.2,<8.0",
+    "pyyaml>=6.0,<7.0",
+    "pydantic>=2.9,<3.0",
+    "prometheus-client>=0.21,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=0.24,<2",
+    "pytest-cov>=6.0,<8",
+    "ruff>=0.8,<1.0",
+    "fakeredis[lua]>=2.26,<3",
+]
+
+[project.scripts]
+relay = "relay.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+relay = ["py.typed", "*.lua"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "ASYNC", "RUF", "S", "PT"]
+ignore = [
+    "S101",  # assert is fine in tests and for internal invariants
+    "S311",  # random is used for retry jitter, not cryptography
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S104", "S105", "S106"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "redis: requires a real Redis server (set REDIS_URL); skipped when unavailable",
+]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["relay", "mock_backend"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
