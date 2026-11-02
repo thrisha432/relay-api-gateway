@@ -17,7 +17,7 @@ Legend: ✅ done and verified by tests that were actually run · 🟡 in progres
 
 | Area | Status |
 |---|---|
-| Audit of v0.1 (docs/AUDIT.md) | ✅ 18 of 19 findings resolved; A15 (CI run on GitHub) needs the repo pushed |
+| Audit of v0.1 (docs/AUDIT.md) | ✅ All 19 findings resolved (A15: CI green on GitHub, 2026-11-02) |
 | Admission control, coalescing, retry budget, least-request, header limits | ✅ implemented + tested |
 | Benchmark-found bugs (pool leak A16, metastable overload A17, head-of-line A19) | ✅ fixed + regression-tested |
 | Benchmark matrix, chaos timelines, A/B tool | ✅ results in `benchmarks/results/` |
@@ -31,5 +31,5 @@ Legend: ✅ done and verified by tests that were actually run · 🟡 in progres
 
 ## Not yet verified
 
-* GitHub Actions CI has not run yet (the repo is not pushed). The first push will exercise it on Python 3.12 and 3.14.
+* GitHub Actions CI runs on every push: 333 tests pass on Python 3.12 and 3.14 against a real Redis service.
 * Grafana screenshots are not captured yet; take them while load runs (see DEMO_SCRIPT.md).
