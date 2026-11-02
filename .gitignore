@@ -37,3 +37,8 @@ mutants/
 
 # local verification logs (scripts/verify.sh)
 verification/
+
+# personal notes kept local (not published)
+CLAUDE_CODE_PROMPT.md
+PROJECT_SPEC.md
+docs/INTERVIEW_GUIDE.md

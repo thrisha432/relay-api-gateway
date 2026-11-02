@@ -1,7 +1,7 @@
 # ADR-001: Technology choices
 
 **Status:** accepted · **Context:** portfolio-grade async HTTP gateway that
-runs locally at $0 and can be explained end to end in an interview.
+runs locally at $0 and can be understood end to end.
 
 ## Decisions
 
